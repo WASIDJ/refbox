@@ -4,12 +4,15 @@ import {
   existsSync,
   readFileSync,
   unlinkSync,
+  copyFileSync,
 } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { userInfo } from "node:os";
 import { execFileSync } from "node:child_process";
 
 const root = resolve(import.meta.dirname, "..");
+const serviceRoot =
+  process.env.REFBOX_INSTALL_DIR ?? "/Library/Application Support/refbox";
 const install = process.argv.includes("--install");
 const uninstall = process.argv.includes("--uninstall");
 if ((install || uninstall) && process.getuid?.() !== 0)
@@ -22,7 +25,7 @@ const owner =
   userInfo().username;
 if (owner === "root")
   throw new Error("需要指定普通控制用户：REFBOX_CONTROL_USER");
-const node = process.execPath;
+const node = resolve(serviceRoot, "runtime/bin/node");
 const xml = (value) =>
   String(value)
     .replaceAll("&", "&amp;")
@@ -36,14 +39,14 @@ const definitions = [
     user: "root",
     args: [
       node,
-      "--env-file=" + resolve(root, ".env"),
-      resolve(root, "apps/runtime/dist/main.js"),
+      "--env-file=" + resolve(serviceRoot, ".env"),
+      resolve(serviceRoot, "apps/runtime/dist/main.js"),
     ],
   },
   {
     name: "ai.refbox.control",
     user: owner,
-    args: [node, resolve(root, "scripts/start-control.mjs")],
+    args: [node, resolve(serviceRoot, "scripts/start-control.mjs")],
   },
 ];
 if (install) {
@@ -52,9 +55,10 @@ if (install) {
     "bin/refbox",
     "apps/runtime/dist/main.js",
     "apps/web/dist/index.html",
+    "var/daemon-node/bin/node",
   ])
     if (!existsSync(resolve(root, file)))
-      throw new Error("请先配置并构建 refbox");
+      throw new Error("请先配置、构建 refbox 并运行 npm run prepare:daemon");
   process.loadEnvFile(resolve(root, ".env"));
   // Stop only this checkout's processes so development listeners cannot block
   // the root runtime. Other applications using the same port are not touched.
@@ -117,6 +121,59 @@ if (install) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
+  // Keep published files and the privileged runtime on the internal disk.
+  // macOS protects removable-volume access independently of Unix root privileges.
+  mkdirSync(serviceRoot, { recursive: true, mode: 0o755 });
+  for (const relative of [
+    "apps",
+    "node_modules",
+    "scripts",
+    "bin",
+    "package.json",
+  ])
+    execFileSync("/usr/bin/ditto", [
+      "--noextattr",
+      "--norsrc",
+      resolve(root, relative),
+      resolve(serviceRoot, relative),
+    ]);
+  execFileSync("/usr/bin/ditto", [
+    "--noextattr",
+    "--norsrc",
+    resolve(root, "var/daemon-node"),
+    resolve(serviceRoot, "runtime"),
+  ]);
+  const data = resolve(serviceRoot, "var");
+  mkdirSync(data, { recursive: true, mode: 0o700 });
+  execFileSync("/usr/sbin/chown", [owner + ":staff", data]);
+  const database = resolve(data, "refbox.sqlite");
+  const sourceDatabase =
+    process.env.REFBOX_DATABASE ?? resolve(root, "var/refbox.sqlite");
+  if (!existsSync(database) && existsSync(sourceDatabase)) {
+    for (const suffix of ["", "-wal", "-shm"])
+      if (existsSync(sourceDatabase + suffix))
+        copyFileSync(sourceDatabase + suffix, database + suffix);
+  }
+  mkdirSync(resolve(data, "workspaces"), { recursive: true, mode: 0o755 });
+  let env = readFileSync(resolve(root, ".env"), "utf8");
+  for (const [key, value] of Object.entries({
+    REFBOX_DATABASE: database,
+    REFBOX_WEB_DIR: resolve(serviceRoot, "apps/web/dist"),
+  }))
+    env = env.replace(
+      new RegExp("^" + key + "=.*$", "m"),
+      key + "='" + value + "'",
+    );
+  writeFileSync(resolve(serviceRoot, ".env"), env, { mode: 0o600 });
+  execFileSync("/usr/sbin/chown", [
+    owner + ":staff",
+    resolve(serviceRoot, ".env"),
+  ]);
+}
+const logRoot = install ? "/Library/Logs/refbox" : resolve(root, "var");
+if (install) {
+  mkdirSync(logRoot, { recursive: true, mode: 0o750 });
+  execFileSync("/usr/sbin/chown", [owner + ":staff", logRoot]);
 }
 const output =
   install || uninstall
@@ -135,11 +192,11 @@ for (const d of definitions) {
   const plist = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>
 <key>Label</key>${string(d.name)}<key>UserName</key>${string(d.user)}
 <key>ProgramArguments</key><array>${d.args.map(string).join("")}</array>
-<key>WorkingDirectory</key>${string(root)}<key>RunAtLoad</key><true/>
+<key>WorkingDirectory</key>${string(serviceRoot)}<key>RunAtLoad</key><true/>
 <key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer>
 <key>EnvironmentVariables</key><dict><key>PATH</key>${string(dirname(node) + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")}</dict>
-<key>StandardOutPath</key>${string(resolve(root, "var", d.name + ".log"))}
-<key>StandardErrorPath</key>${string(resolve(root, "var", d.name + ".error.log"))}
+<key>StandardOutPath</key>${string(resolve(logRoot, d.name + ".log"))}
+<key>StandardErrorPath</key>${string(resolve(logRoot, d.name + ".error.log"))}
 </dict></plist>\n`;
   writeFileSync(path, plist, { mode: 0o644 });
   execFileSync("/usr/bin/plutil", ["-lint", path], { stdio: "inherit" });

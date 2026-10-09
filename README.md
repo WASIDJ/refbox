@@ -55,13 +55,28 @@ node scripts/start-control.mjs
 构建和配置完成后，先生成并校验 launchd 清单，再以管理员身份安装：
 
 ```sh
+npm run prepare:daemon
 node scripts/launchd.mjs
 sudo "$(command -v node)" scripts/launchd.mjs --install
 ```
 
-安装后，`ai.refbox.engine` 以 root 运行，`ai.refbox.control` 以安装者的普通账户运行。两个服务由 launchd 保持运行并在退出后重新启动。日志位于 `var/ai.refbox.*.log` / `.error.log`。
+安装后，`ai.refbox.engine` 以 root 运行，`ai.refbox.control` 以安装者的普通账户运行。两个服务由 launchd 保持运行并在退出后重新启动。日志位于 `/Library/Logs/refbox/`。
+
+发布文件、独立 Node 24 运行时和生产数据放在内部盘 `/Library/Application Support/refbox/`。准备脚本下载官方运行时并检查 SHA-256；首次安装迁移开发数据库，后续安装保留生产数据库。生产配置路径由安装器改写，原仓库与开发配置保留。这样避免 root 后台进程因外接盘上的 Homebrew 依赖而无法启动。
+
+可使用 `/Library/Application Support/refbox/var/workspaces` 作为初始工作目录。外接盘业务目录仍受 macOS 的独立隐私权限约束；需要由用户在系统设置中授权，不修改系统隐私数据库。
 
 默认仅监听本机。需要家庭网络 / VPN 访问时，在 `.env` 配置 `REFBOX_LISTEN` 为目标私网地址；使用 HTTPS 反向代理时设置 `REFBOX_SECURE_COOKIE=true`。不提供公网部署或多用户注册。
+
+### Tailscale 私人 HTTPS 入口
+
+保持 Go 监听 `127.0.0.1:8080`，设置 `REFBOX_SECURE_COOKIE=true` 后重新安装服务，再运行：
+
+```sh
+tailscale serve --bg --yes --https=10000 http://127.0.0.1:8080
+```
+
+该端口用于独立入口，不占用已有 443 / 8443 服务。实际访问地址由命令返回；Serve 只向 tailnet 提供访问。移除入口使用 `tailscale serve --https=10000 off`，不要 reset 整台机器的 Serve 配置。
 
 移除常驻服务但保留配置与数据库：
 
@@ -69,7 +84,7 @@ sudo "$(command -v node)" scripts/launchd.mjs --install
 sudo "$(command -v node)" scripts/launchd.mjs --uninstall
 ```
 
-升级需用户决定：停止服务、备份 `var/` 和 `.env`、更新代码与依赖、重新构建、重新安装。Agent 可以开发和测试改进，但工作规则要求它不替换正在运行的版本。
+升级需用户决定：停止服务、备份生产目录中的 `var/` 和 `.env`、更新代码与依赖、重新构建、重新安装。Agent 可以开发和测试改进，但工作规则要求它不替换正在运行的版本。
 
 ## 使用闭环
 

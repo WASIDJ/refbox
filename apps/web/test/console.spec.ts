@@ -17,7 +17,12 @@ test("login, confirm the real acceptance task, inspect results and reports, and 
   await page.getByLabel("管理员密码").fill(password);
   await page.getByRole("button", { name: "进入 refbox →" }).click();
   await expect(page.getByText("工作空间已连接")).toBeVisible();
-  await page.getByRole("button", { name: /验收：后台执行与成果验证/ }).click();
+  await page
+    .locator(".task-card")
+    .filter({
+      hasText: process.env.REFBOX_TEST_TASK_TITLE ?? "验收：后台执行与成果验证",
+    })
+    .click();
   const approve = page.getByRole("button", { name: "确认标准并开始执行 →" });
   if (await approve.isVisible()) await approve.click();
   await expect(page.locator(".drawer .tag")).toHaveText("已完成", {
@@ -27,11 +32,11 @@ test("login, confirm the real acceptance task, inspect results and reports, and 
   await expect(page.getByText("退出码 0", { exact: true })).toBeVisible();
   const artifact = page
     .locator(".result-card .artifact")
-    .filter({ hasText: "result.txt" });
+    .filter({ hasText: process.env.REFBOX_TEST_ARTIFACT ?? "result.txt" });
   await expect(artifact).toBeVisible();
   await artifact.click();
   await expect(page.locator(".artifact-modal pre")).toHaveText(
-    "REFBOX_VERIFIED",
+    process.env.REFBOX_TEST_EXPECTED ?? "REFBOX_VERIFIED",
   );
   await page.getByRole("button", { name: "关闭产物" }).click();
   await page.getByRole("button", { name: "汇报", exact: true }).click();

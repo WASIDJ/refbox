@@ -12,7 +12,8 @@
     "dev:web": "npm run dev --workspace apps/web",
     "configure": "node scripts/configure.mjs",
     "test:ui": "npm test --workspace apps/web",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "prepare:daemon": "node scripts/prepare-node.mjs"
   },
   "devDependencies": {
     "prettier": "^3.9.9"

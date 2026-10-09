@@ -18,7 +18,7 @@ func env(key, value string) string {
 	return value
 }
 func main() {
-	app, err := control.New(control.Config{EngineURL: env("REFBOX_ENGINE_URL", "http://127.0.0.1:8801"), EngineToken: os.Getenv("REFBOX_ENGINE_TOKEN"), PasswordHash: os.Getenv("REFBOX_PASSWORD_HASH"), WebDir: env("REFBOX_WEB_DIR", "apps/web/dist"), SecureCookie: os.Getenv("REFBOX_SECURE_COOKIE") == "true"})
+	app, err := control.New(control.Config{EngineURL: env("REFBOX_ENGINE_URL", "http://127.0.0.1:18801"), EngineToken: os.Getenv("REFBOX_ENGINE_TOKEN"), PasswordHash: os.Getenv("REFBOX_PASSWORD_HASH"), WebDir: env("REFBOX_WEB_DIR", "apps/web/dist"), SecureCookie: os.Getenv("REFBOX_SECURE_COOKIE") == "true"})
 	if err != nil {
 		log.Fatal("配置无效：", err)
 	}

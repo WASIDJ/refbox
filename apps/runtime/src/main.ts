@@ -38,7 +38,7 @@ try {
     process.env.REFBOX_MODEL ?? "kimi-k3",
   ).open(await openNodeSqliteStorage(database));
   const server = runtimeServer(engine, process.env.REFBOX_ENGINE_TOKEN ?? "");
-  const port = Number(process.env.REFBOX_ENGINE_PORT ?? 8801);
+  const port = Number(process.env.REFBOX_ENGINE_PORT ?? 18801);
   server.listen(port, "127.0.0.1", () =>
     console.log(
       `refbox 执行服务：127.0.0.1:${port}，uid=${process.getuid?.()}`,
