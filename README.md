@@ -66,7 +66,7 @@ sudo "$(command -v node)" scripts/launchd.mjs --install
 
 可使用 `/Library/Application Support/refbox/var/workspaces` 作为初始工作目录。外接盘业务目录仍受 macOS 的独立隐私权限约束；需要由用户在系统设置中授权，不修改系统隐私数据库。
 
-默认仅监听本机。需要家庭网络 / VPN 访问时，在 `.env` 配置 `REFBOX_LISTEN` 为目标私网地址；使用 HTTPS 反向代理时设置 `REFBOX_SECURE_COOKIE=true`。不提供公网部署或多用户注册。
+Go 默认仅监听本机，Cloudflare Tunnel 提供外部 HTTPS 入口；配置 `REFBOX_SECURE_COOKIE=true`。控制台维持单用户登录，不提供多用户注册。
 
 ### Cloudflare Tunnel HTTPS 入口
 
