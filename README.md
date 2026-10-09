@@ -63,7 +63,7 @@ sudo "$(command -v node)" scripts/launchd.mjs --install
 
 默认仅监听本机。需要家庭网络 / VPN 访问时，在 `.env` 配置 `REFBOX_LISTEN` 为目标私网地址；使用 HTTPS 反向代理时设置 `REFBOX_SECURE_COOKIE=true`。不提供公网部署或多用户注册。
 
-停止服务但保留配置与数据库：
+移除常驻服务但保留配置与数据库：
 
 ```sh
 sudo "$(command -v node)" scripts/launchd.mjs --uninstall

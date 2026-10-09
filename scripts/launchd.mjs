@@ -1,4 +1,10 @@
-import { writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
+import {
+  writeFileSync,
+  mkdirSync,
+  existsSync,
+  readFileSync,
+  unlinkSync,
+} from "node:fs";
 import { resolve, dirname } from "node:path";
 import { userInfo } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -40,6 +46,78 @@ const definitions = [
     args: [node, resolve(root, "scripts/start-control.mjs")],
   },
 ];
+if (install) {
+  for (const file of [
+    ".env",
+    "bin/refbox",
+    "apps/runtime/dist/main.js",
+    "apps/web/dist/index.html",
+  ])
+    if (!existsSync(resolve(root, file)))
+      throw new Error("请先配置并构建 refbox");
+  process.loadEnvFile(resolve(root, ".env"));
+  // Stop only this checkout's processes so development listeners cannot block
+  // the root runtime. Other applications using the same port are not touched.
+  for (const d of definitions) {
+    try {
+      execFileSync("/bin/launchctl", ["bootout", "system/" + d.name], {
+        stdio: "ignore",
+      });
+    } catch {}
+  }
+  const candidates = [];
+  const lock =
+    (process.env.REFBOX_DATABASE ?? resolve(root, "var/refbox.sqlite")) +
+    ".lock";
+  if (existsSync(lock))
+    candidates.push({
+      pid: Number(readFileSync(lock, "utf8")),
+      match: "apps/runtime/dist/main.js",
+    });
+  const port = (process.env.REFBOX_LISTEN ?? "127.0.0.1:8080")
+    .split(":")
+    .at(-1);
+  try {
+    const pids = execFileSync(
+      "/usr/sbin/lsof",
+      ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    );
+    for (const pid of pids.trim().split(/\s+/))
+      if (pid)
+        candidates.push({
+          pid: Number(pid),
+          match: resolve(root, "bin/refbox"),
+        });
+  } catch {}
+  for (const { pid, match } of candidates) {
+    if (!Number.isInteger(pid) || pid <= 1) continue;
+    let ours = false;
+    try {
+      const cmd = execFileSync(
+        "/bin/ps",
+        ["-p", String(pid), "-o", "command="],
+        { encoding: "utf8" },
+      );
+      const cwd = execFileSync(
+        "/usr/sbin/lsof",
+        ["-a", "-p", String(pid), "-d", "cwd", "-Fn"],
+        { encoding: "utf8" },
+      );
+      ours = cmd.includes(match) && cwd.split("\n").includes("n" + root);
+    } catch {}
+    if (!ours) continue;
+    process.kill(pid, "SIGTERM");
+    for (let n = 0; n < 120; n++) {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+}
 const output =
   install || uninstall
     ? "/Library/LaunchDaemons"
@@ -51,6 +129,7 @@ for (const d of definitions) {
     try {
       execFileSync("/bin/launchctl", ["bootout", "system/" + d.name]);
     } catch {}
+    if (existsSync(path)) unlinkSync(path);
     continue;
   }
   const plist = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>
@@ -81,6 +160,6 @@ for (const d of definitions) {
     console.log("已安装 " + d.name + "，运行用户 " + d.user);
   }
 }
-if (uninstall) console.log("已停止服务；plist、数据库与配置均保留。");
+if (uninstall) console.log("已移除常驻服务；数据库与配置均保留。");
 else if (!install)
   console.log("已生成并校验安装清单：var/launchd/（尚未安装）。");
