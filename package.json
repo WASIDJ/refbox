@@ -1,0 +1,20 @@
+{
+  "name": "refbox",
+  "private": true,
+  "workspaces": [
+    "apps/runtime",
+    "apps/web"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces && mkdir -p bin && go build -o bin/refbox ./cmd/refbox",
+    "test": "npm test --workspace apps/runtime && go test -race ./...",
+    "dev:runtime": "npm run dev --workspace apps/runtime",
+    "dev:web": "npm run dev --workspace apps/web",
+    "configure": "node scripts/configure.mjs",
+    "test:ui": "npm test --workspace apps/web",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "devDependencies": {
+    "prettier": "^3.9.9"
+  }
+}

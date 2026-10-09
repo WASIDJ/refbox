@@ -1,0 +1,11 @@
+node_modules/
+apps/*/dist/
+var/
+.env
+.env.*
+!.env.example
+bin/
+*.sqlite*
+.DS_Store
+apps/web/test-results/
+apps/web/playwright-report/

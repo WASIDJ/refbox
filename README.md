@@ -26,12 +26,80 @@ flowchart LR
 
 ## 初步实现
 
-先在个人 Homelab 的 Mac mini 上验证单个任务的持续迭代闭环：后台运行、连续实验、结果验证、保存可复现产物和失败经验，并生成次日汇报。
+第一版提供 Homelab Web 看板、目标确认、后台执行、实际验证、实验与产物记录、停止与继续、进展汇报和独立服务入口。任务和运行状态由 Pi Durable 的本地 SQLite 持久化。
 
-长期交互愿景是通过 Web Kanban 安排任务和查看进展。初期先验证执行闭环；完整看板调度、自主寻找优化目标、修改自身引擎和多任务并行留待后续讨论。
+技术栈：Go 控制层 + Node.js / Pi Durable 1.1.0 + React / TypeScript / Vite。首版只接入 Engy，默认模型为 `kimi-k3`。详细职责和 API 见 [架构说明](docs/architecture.md)。
 
 ## 当前状态
 
-本仓库当前用于记录需求、调研和讨论，尚无可运行实现。最终方案、首个实验场景、验证指标、预算、汇报时间与渠道均待讨论；Pi 与相关扩展是候选技术。
+## 本地启动
+
+需要 Go 1.24+、Node.js 22.19+、npm，以及已配置的 Pi `engy` provider。
+
+```sh
+npm ci
+npm run build
+npm run configure
+# 终端一：执行服务（开发时为普通用户）
+node --env-file=.env apps/runtime/dist/main.js
+# 终端二：Go 控制服务
+node scripts/start-control.mjs
+```
+
+打开 <http://127.0.0.1:8080>。初始管理员密码保存在 `var/bootstrap-password.txt`，只有当前用户可读；密码 hash 和内部 token 保存在不提交 Git 的 `.env`。配置脚本不会覆盖已有配置。
+
+`PI_PROFILE_DIR` 必须指向你的 Pi 配置目录，root 服务也使用这个明确路径。执行服务读取 Engy 模型配置与直接 API Key，不读取其他 provider，也不执行凭据中的 shell 命令。可以用 `ENGY_API_KEY` 覆盖凭据来源。
+
+## Mac mini 常驻部署
+
+构建和配置完成后，先生成并校验 launchd 清单，再以管理员身份安装：
+
+```sh
+node scripts/launchd.mjs
+sudo "$(command -v node)" scripts/launchd.mjs --install
+```
+
+安装后，`ai.refbox.engine` 以 root 运行，`ai.refbox.control` 以安装者的普通账户运行。两个服务由 launchd 保持运行并在退出后重新启动。日志位于 `var/ai.refbox.*.log` / `.error.log`。
+
+默认仅监听本机。需要家庭网络 / VPN 访问时，在 `.env` 配置 `REFBOX_LISTEN` 为目标私网地址；使用 HTTPS 反向代理时设置 `REFBOX_SECURE_COOKIE=true`。不提供公网部署或多用户注册。
+
+停止服务但保留配置与数据库：
+
+```sh
+sudo "$(command -v node)" scripts/launchd.mjs --uninstall
+```
+
+升级需用户决定：停止服务、备份 `var/` 和 `.env`、更新代码与依赖、重新构建、重新安装。Agent 可以开发和测试改进，但工作规则要求它不替换正在运行的版本。
+
+## 使用闭环
+
+1. 在看板创建目标，指定已有工作目录与模型。
+2. 让 Agent 提出计划、完成标准和验证命令；此阶段不执行业务命令。
+3. 检查或修改标准后确认，让 Agent 自主实验。
+4. 查看原生运行日志、实验声明、真实工具证据和实际验证输出。
+5. 验证成功后结束；遇到阻塞等待指引。可随时停止并基于保存的上下文继续。
+
+每天北京时间 09:00 保存汇报到控制台；重启后补生成缺失日期。也可手动保存当天汇报，同一日期不重复生成。
+
+## 验证与边界
+
+```sh
+npm test
+npm run build
+```
+
+测试使用原生 Pi Durable、实际文件工具和 SQLite，覆盖确认门槛、持续迭代、验证失败、停止继续、真实进程崩溃恢复、持久化、去重、认证和事件快照。首次实现已在目标 Mac mini 验证 Engy 的真实调用，以及实际文件生成、实验记录和成果验证闭环。
+
+两个服务启动后，可以准备安全的文件生成验收任务，再运行浏览器验收（首次需要安装 Playwright Chromium）：
+
+```sh
+npm run smoke
+npx playwright install chromium
+npm run test:ui
+```
+
+该验收会使用真实 Engy 模型，在 `var/acceptance/` 内生成文件。已完成的验收任务会被复用，便于重复检查登录、成果预览、汇报和移动端布局。
+
+首版使用固定验证命令判定完成；验证命令的有效性由用户确认。业务应用独立运行，财务、比赛模型等并未内置。远程节点、其他 agent/provider、常驻周期任务与完整服务管理面板留待后续。
 
 初步实现需求见 [Issue #1](https://github.com/WASIDJ/refbox/issues/1)。
