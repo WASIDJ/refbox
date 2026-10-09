@@ -52,3 +52,9 @@ Go 只负责入口、认证、转发、静态文件与日报触发，不拥有 S
 Go 的执行服务契约与看板不依赖具体业务；以后可以接入远程执行服务或其他 agent 的适配器。首版 loopback 限制是有意的，远程接入需要另做传输认证。业务通过目录说明和 agent 工具接入，不把业务数据库搬进 refbox。
 
 常驻周期职责、完整服务管理界面、其他 provider、跨机器部署与自动更新均未实现。
+
+## Cloudflare Tunnel 部署
+
+独立命名 Tunnel 将 HTTPS 域名转发到 Go 的回环 HTTP 服务，connector 由 `ai.refbox.tunnel` 保持运行。执行器接口仍为仅本机、独立认证的接口，不直接发布到 Tunnel。refbox 的单用户密码、Secure / HttpOnly Cookie 与写请求保护适用于公开域名。
+
+不依赖 Tailscale MagicDNS 或客户端 VPN。部署验证应包括域名的浏览器登录、SSE 状态快照、产物预览与 Cookie 属性；仅 connector 健康不代表网站可用。

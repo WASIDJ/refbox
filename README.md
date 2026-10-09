@@ -68,15 +68,29 @@ sudo "$(command -v node)" scripts/launchd.mjs --install
 
 默认仅监听本机。需要家庭网络 / VPN 访问时，在 `.env` 配置 `REFBOX_LISTEN` 为目标私网地址；使用 HTTPS 反向代理时设置 `REFBOX_SECURE_COOKIE=true`。不提供公网部署或多用户注册。
 
-### Tailscale 私人 HTTPS 入口
+### Cloudflare Tunnel HTTPS 入口
 
-保持 Go 监听 `127.0.0.1:8080`，设置 `REFBOX_SECURE_COOKIE=true` 后重新安装服务，再运行：
+部署入口使用独立的命名 Cloudflare Tunnel。Go 保持监听 `127.0.0.1:8080`，配置 `REFBOX_SECURE_COOKIE=true`，由 Cloudflare 提供浏览器 HTTPS；refbox 自身的单用户登录继续保护任务与控制接口。
+
+在已登录 Cloudflare 的机器上创建独立 Tunnel，并准备一个专用配置文件（不要使用其他应用的默认 Tunnel 配置）：
 
 ```sh
-tailscale serve --bg --yes --https=10000 http://127.0.0.1:8080
+cloudflared tunnel create refbox
 ```
 
-该端口用于独立入口，不占用已有 443 / 8443 服务。实际访问地址由命令返回；Serve 只向 tailnet 提供访问。移除入口使用 `tailscale serve --https=10000 off`，不要 reset 整台机器的 Serve 配置。
+配置中的 `tunnel` 为新建 UUID，`credentials-file` 指向生成的凭据文件；ingress 仅把所选域名转发到 `http://127.0.0.1:8080`，其余请求返回 404。使用专用配置明确创建 DNS 路由，然后安装独立常驻 connector：
+
+```sh
+cloudflared tunnel --config var/cloudflare-refbox.yml route dns TUNNEL_UUID refbox.example.com
+sudo "$(command -v node)" scripts/install-cloudflare.mjs \
+  --hostname refbox.example.com \
+  --tunnel TUNNEL_UUID \
+  --credentials /absolute/path/to/TUNNEL_UUID.json
+```
+
+`ai.refbox.tunnel` 以普通用户运行，发布到内部盘的 connector、配置与凭据位于生产目录。凭据只保存在本机，日志位于 `/Library/Logs/refbox/tunnel*.log`。安装器会校验 ingress；访问地址为所配置的 HTTPS 域名。
+
+Tailscale 已退出 refbox 的部署路径，相关入口已移除。
 
 移除常驻服务但保留配置与数据库：
 
