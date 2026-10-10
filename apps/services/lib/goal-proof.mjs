@@ -194,6 +194,8 @@ async function run(
     stderrBytes = 0;
   const stdoutHash = createHash("sha256"),
     stderrHash = createHash("sha256");
+  const passedGoTests = new Set();
+  let goOutputLine = "";
   let timedOut = false;
   const child = spawn(executable, args, {
     cwd,
@@ -205,6 +207,13 @@ async function run(
     stdoutHash.update(chunk);
     stdoutBytes += chunk.length;
     stdout = Buffer.concat([stdout, chunk]).subarray(-limit);
+    goOutputLine += chunk.toString();
+    const lines = goOutputLine.split("\n");
+    goOutputLine = lines.pop().slice(-16384);
+    for (const line of lines) {
+      const match = line.match(/^--- PASS: (Test[A-Za-z0-9_]+)(?:\s|$)/);
+      if (match) passedGoTests.add(match[1]);
+    }
   });
   child.stderr.on("data", (chunk) => {
     stderrHash.update(chunk);
@@ -248,6 +257,7 @@ async function run(
     stdoutSha256: stdoutHash.digest("hex"),
     stderrSha256: stderrHash.digest("hex"),
     outputTruncated: stdoutBytes > limit || stderrBytes > limit,
+    passedGoTests: [...passedGoTests],
   };
 }
 
@@ -473,6 +483,42 @@ async function runTrustedCommand(
       throw new Error("Trusted shared Node dependencies are unavailable");
     return join(dependencies, path);
   };
+  const goTests = async () => {
+    const paths = all.filter((path) => path.endsWith("_test.go"));
+    if (!paths.length) throw new Error("Trusted Go test set is empty");
+    const required = new Set();
+    for (const path of paths) {
+      const source = await readFile(join(validation.trusted, path), "utf8");
+      for (const match of source.matchAll(
+        /^\s*func\s+(Test[A-Za-z0-9_]+)\s*\(/gm,
+      ))
+        required.add(match[1]);
+    }
+    supervisor.requiredGoTestNames = [...required].sort();
+    if (!required.size)
+      throw new Error(
+        "Trusted Go baseline contains no executable named test fixtures",
+      );
+    const success = await step("go", [
+      "test",
+      "-race",
+      "-count=1",
+      "-v",
+      "./...",
+    ]);
+    if (!success) return false;
+    const witness = runs.at(-1);
+    const observed = new Set(witness.passedGoTests);
+    const missing = [...required].filter((name) => !observed.has(name));
+    if (missing.length) {
+      witness.fixtureCoverageFailure =
+        "Frozen Go test fixtures were not executed: " + missing.join(", ");
+      supervisor.fixtureCoveragePassed = false;
+      witness.stderr += "\n" + witness.fixtureCoverageFailure;
+      return false;
+    }
+    return true;
+  };
   let passed = true;
   if (supervisor.modifiedFrozenFiles.length) {
     return {
@@ -540,8 +586,7 @@ async function runTrustedCommand(
           node("tsx/dist/loader.mjs"),
           "apps/web/test/api-check.mjs",
         ]);
-      if (passed)
-        passed = await step("go", ["test", "-race", "-count=1", "-v", "./..."]);
+      if (passed) passed = await goTests();
     } else if (passed && command === "build") {
       passed = await step(process.execPath, [
         node("typescript/bin/tsc"),
@@ -591,9 +636,7 @@ async function runTrustedCommand(
     }
   } else if (supervisor.profile === "go") {
     if (command === "tests") {
-      if (!all.some((path) => path.endsWith("_test.go")))
-        throw new Error("Trusted Go test set is empty");
-      passed = await step("go", ["test", "-race", "-count=1", "-v", "./..."]);
+      passed = await goTests();
     } else if (command === "build")
       passed = await step("go", ["build", "./..."]);
     else

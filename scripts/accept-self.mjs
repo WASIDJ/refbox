@@ -55,7 +55,8 @@ async function start(name){
   const privileged=process.getuid()===0;
   const cmd=privileged&&name!=="engine"?"/usr/bin/sudo":node;
   const argv=privileged&&name!=="engine"?["-u","ryou","-E",...args]:args.slice(1);
-  const child=spawn(cmd,argv,{cwd:repo,env:{...process.env,HOME:"/Users/ryou"},stdio:["ignore",log.fd,log.fd]});
+  const launchEnv=Object.fromEntries(Object.entries(process.env).filter(([key])=>!key.startsWith("REFBOX_")));
+  const child=spawn(cmd,argv,{cwd:repo,env:{...launchEnv,HOME:"/Users/ryou"},stdio:["ignore",log.fd,log.fd]});
   children.set(name,{child,log,exited:false});child.once("exit",()=>{const entry=children.get(name);if(entry)entry.exited=true;});
   progress({started:name,pid:child.pid});
 }
