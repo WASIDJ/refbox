@@ -7,10 +7,12 @@ export default function TaskDetail({
   task,
   onClose,
   refresh,
+  onUpdated,
 }: {
   task: Task;
   onClose: () => void;
   refresh: () => Promise<void>;
+  onUpdated: (task: Task) => void;
 }) {
   const [tab, setTab] = useState("overview"),
     [legacy, setLegacy] = useState<LegacyTask | null>(null),
@@ -62,8 +64,7 @@ export default function TaskDetail({
     setError("");
     try {
       await operation();
-      await refresh();
-      await load();
+      await Promise.all([refresh(), load()]);
       return true;
     } catch (cause) {
       setError((cause as Error).message);
@@ -73,9 +74,15 @@ export default function TaskDetail({
     }
   }
   const action = (name: string, body: unknown = {}) =>
-    perform(() =>
-      api(`/platform/tasks/${encodeURIComponent(task.id)}/${name}`, body),
-    );
+    perform(async () => {
+      const result = await api<Task>(
+        `/platform/tasks/${encodeURIComponent(task.id)}/${name}`,
+        body,
+      );
+      // These endpoints return the acknowledged business task. Show that
+      // result immediately while independent history/snapshot refreshes run.
+      if (name === "status" || name === "accept") onUpdated(result);
+    });
   async function showArtifact(path: string) {
     await perform(async () => {
       const response = await fetch(

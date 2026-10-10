@@ -457,6 +457,48 @@ test("business status errors surface and human acceptance preserves the proof di
   ).toContain("三项统计");
 });
 
+test("acknowledged business status is visible while background snapshot refresh waits", async ({
+  page,
+}) => {
+  const mock = await installMock(page);
+  await login(page);
+  await page.getByRole("button", { name: "长期任务", exact: true }).click();
+  await page.getByRole("button", { name: /生成本月报告/ }).click();
+  const dialog = page.getByRole("dialog", { name: "任务详情" });
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let refreshRequested = false;
+  await page.route(
+    "https://refbox.test/api/platform/snapshot",
+    async (route) => {
+      refreshRequested = true;
+      await blocked;
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify(mock.state),
+      });
+    },
+  );
+  try {
+    await dialog.getByLabel("任务状态").selectOption("active");
+    await dialog.getByRole("button", { name: "保存状态" }).click();
+    await expect(dialog.locator(".badge.state-active")).toHaveText("进行中", {
+      timeout: 1000,
+    });
+    expect(refreshRequested).toBe(true);
+    expect(
+      mock.calls.find((call) => call.path.endsWith("/status"))?.body,
+    ).toEqual({ status: "active" });
+  } finally {
+    release();
+  }
+  await expect(dialog.getByText("正在提交请求…", { exact: true })).toHaveCount(
+    0,
+  );
+});
+
 test("plugins expose real workspaces and declared tools, with offline registration errors", async ({
   page,
 }) => {

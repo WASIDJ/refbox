@@ -968,6 +968,14 @@ export default function App() {
           key={task.id}
           task={task}
           refresh={refresh}
+          onUpdated={(updated) =>
+            setSnapshot((current) => ({
+              ...current,
+              tasks: current.tasks.map((candidate) =>
+                candidate.id === updated.id ? updated : candidate,
+              ),
+            }))
+          }
           onClose={() => setSelectedTask("")}
         />
       )}

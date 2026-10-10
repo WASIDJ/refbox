@@ -3,6 +3,7 @@ package control
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -14,9 +15,72 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
+
+func acceptsSnapshotGzip(r *http.Request) bool {
+	for _, item := range strings.Split(strings.Join(r.Header.Values("Accept-Encoding"), ","), ",") {
+		parts := strings.Split(item, ";")
+		if !strings.EqualFold(strings.TrimSpace(parts[0]), "gzip") {
+			continue
+		}
+		quality := 1.0
+		for _, parameter := range parts[1:] {
+			key, value, found := strings.Cut(strings.TrimSpace(parameter), "=")
+			if found && strings.EqualFold(strings.TrimSpace(key), "q") {
+				q, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+				if err != nil || q < 0 || q > 1 {
+					return false
+				}
+				quality = q
+			}
+		}
+		return quality > 0
+	}
+	return false
+}
+
+func (s *Server) platformSnapshotJSON() ([]byte, error) {
+	value := s.platform.snapshot()
+	// Stable array ordering prevents map iteration or equal timestamps from
+	// making an unchanged snapshot appear changed on every polling interval.
+	sort.Slice(value.Workers, func(i, j int) bool { return value.Workers[i].ID < value.Workers[j].ID })
+	sort.Slice(value.Tasks, func(i, j int) bool {
+		if value.Tasks[i].CreatedAt == value.Tasks[j].CreatedAt {
+			return value.Tasks[i].ID < value.Tasks[j].ID
+		}
+		return value.Tasks[i].CreatedAt > value.Tasks[j].CreatedAt
+	})
+	sort.Slice(value.Incidents, func(i, j int) bool {
+		if value.Incidents[i].OpenedAt == value.Incidents[j].OpenedAt {
+			return value.Incidents[i].ID < value.Incidents[j].ID
+		}
+		return value.Incidents[i].OpenedAt > value.Incidents[j].OpenedAt
+	})
+	return json.Marshal(value)
+}
+
+func (s *Server) writePlatformSnapshot(w http.ResponseWriter, r *http.Request) {
+	raw, err := s.platformSnapshotJSON()
+	if err != nil {
+		jsonError(w, 500, "snapshot unavailable")
+		return
+	}
+	w.Header().Add("Vary", "Accept-Encoding")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	if acceptsSnapshotGzip(r) {
+		w.Header().Set("Content-Encoding", "gzip")
+		compressed, _ := gzip.NewWriterLevel(w, gzip.BestSpeed)
+		defer compressed.Close()
+		_, _ = compressed.Write(append(raw, '\n'))
+		return
+	}
+	_, _ = w.Write(append(raw, '\n'))
+}
 
 func decodeBody(w http.ResponseWriter, r *http.Request, v any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, 128000)
@@ -238,7 +302,7 @@ func (s *Server) platformAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == "GET" && r.URL.Path == "/api/platform/snapshot" {
-		writeJSON(w, 200, s.platform.snapshot())
+		s.writePlatformSnapshot(w, r)
 		return
 	}
 	if r.Method == "GET" && len(parts) == 4 && parts[2] == "diagnoses" {
@@ -251,17 +315,41 @@ func (s *Server) platformAPI(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("X-Accel-Buffering", "no")
+		w.Header().Add("Vary", "Accept-Encoding")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			jsonError(w, 500, "stream unavailable")
 			return
 		}
+		var writer io.Writer = w
+		var compressed *gzip.Writer
+		if acceptsSnapshotGzip(r) {
+			w.Header().Set("Content-Encoding", "gzip")
+			compressed, _ = gzip.NewWriterLevel(w, gzip.BestSpeed)
+			defer compressed.Close()
+			writer = compressed
+		}
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
+		var previous []byte
 		for {
-			raw, _ := json.Marshal(s.platform.snapshot())
-			if _, err := fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", raw); err != nil {
+			raw, err := s.platformSnapshotJSON()
+			if err != nil {
 				return
+			}
+			if bytes.Equal(raw, previous) {
+				_, err = io.WriteString(writer, ": heartbeat\n\n")
+			} else {
+				_, err = fmt.Fprintf(writer, "event: snapshot\ndata: %s\n\n", raw)
+				previous = raw
+			}
+			if err != nil {
+				return
+			}
+			if compressed != nil {
+				if err := compressed.Flush(); err != nil {
+					return
+				}
 			}
 			flusher.Flush()
 			select {
