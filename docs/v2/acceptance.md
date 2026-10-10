@@ -1,6 +1,6 @@
 # 平台基础实现与验收记录
 
-本轮交付代码与本地可执行构建，生产尚未升级。现有 Cloudflare URL 保持原运行版本；没有修改 Tailscale、代理或实际 launchd 服务。
+2026-10-10，PR #6 已部署到当前 Mac mini，实际入口为 https://refbox.jeffkafka.top。沿用既有 Cloudflare tunnel、配置、凭据和 DNS；相关三个配置文件 SHA-256 与部署前一致，没有操作 Tailscale 或代理。生产目录已备份到 `/Library/Application Support/refbox-backups/20261010-pr6/`（受保护的本机目录）。
 
 ## 已完成
 
@@ -13,20 +13,31 @@
 
 ## 自动验证
 
-`npm test` 通过：原生 Pi 9 项；独立服务 9 项；Go 控制层 15 项；broker 6 项实质测试（另有 SIGKILL 子进程辅助入口）；前端 API 请求重试检查通过。真实 SQLite、文件操作、SIGKILL 和 HTTP 处理器被实际执行。独立模型流程测试使用可控 provider，证明工具范围与持久会话行为，没有把它称为真实 Engy 验收。
+`npm test` 通过：原生 Pi 9 项；独立服务的功能、鉴权、持久化和独立会话测试；Go 控制层与 broker 的 race 测试；前端 API 请求重试检查通过。真实 SQLite、文件操作、SIGKILL、HTTP 处理器以及实际快照/事件流传输被执行。独立模型流程测试使用可控 provider，证明工具范围与持久会话行为，没有把它称为真实 Engy 验收。
 
 `npm run build` 通过，生成 React 生产文件、Node 执行器以及 Go control/broker 可执行文件。配置再次运行不覆盖原凭据，各服务 token 互异；安装清单校验通过。
 
-## 未完成的运行验收
+## 真实运行验收
 
-当前会话的文件系统只允许写 NOTE 和临时目录；目标仓库与 `/Library/Application Support/refbox` 不在可写范围。禁止在此环境安装/替换目标 daemon。
+- 部署审计通过：engine 与 broker 为 uid 0，其余四个服务为 uid 501。verifier 的 reviewerAvailable=true，独立数据库与浏览器可用；未授权及错误角色 token 均被拒绝。
+- 原生任务 3、32 及实验、自检和汇报历史保留。原有已完成任务没有被升级为独立 pass。
+- 真实 TCP 服务套件 13 项通过，覆盖功能故障、认证、独立会话、原始响应证据与实际监控序列；实际浏览器模拟 API 回归 5 项通过。
+- 实际 Cloudflare 浏览器验收 2 项通过，覆盖历史产物、真实状态修改与刷新、拒绝未验证完成、人工验收、插件写入/读回/iframe/刷新、键盘、手机布局、退出与未登录拒绝；未出现页面 JavaScript 异常。详见 [界面记录](ui-live.md)。
+- 隔离真实跨进程验收 8 项通过：HTTP 200 但业务故障、实际命名重启、三次健康采样、真实 Engy/kimi-k3 独立复核、Pi 与验证器离线、插件事件/禁用/离线、实际过期等待、两次上限、平台重启与动作幂等。fixture 只在普通用户的 GUI domain 重启，生产 root broker 权限由独立部署审计确认；不把两者混称。详见 [服务记录](live-services.md)。
+- 生产独立 Prove It Worker 对实际 Cloudflare 入口执行固定 http_json、browser_ui 检查，附上三条真实连续监控记录、响应正文摘要/哈希、断言的实际值和浏览器可见文本，并由其独立 Pi 会话 35 给出 pass；该请求标记为部署验收，没有虚构生产故障事件。
+- 真实 root Agent 任务 86 经计划、批准、实验与固定自检生成 `ROOT_VERIFIED_PR6`。退出码 0，已登记实际文件和工具证据，产物通过 Cloudflare 读回。执行结果标为 execution_assertion，检查后的业务闭合标为 manual，没有伪装成领域任务的独立证明。
 
-本地端口监听被拒绝（listen EPERM），Chromium 启动被拒绝（MachPortRendezvousServer Permission denied）。因此以下项目保留为待验收，不使用编译或进程内测试冒充它们：
+原始本机证据保存在 `var/deployment-audit.json`、`var/cross-process-acceptance.json`、`var/cf-prove-evidence-final.json`、`var/root-task-acceptance.json`、`var/screenshots/live-ui-acceptance.json` 和实际截图。配置、密码、API Key 和数据库不提交仓库。
 
-- 真实 TCP 与完整跨进程故障服务闭环：恢复、两次失败后停止、Pi 离线、验证器/插件离线、平台重启。
-- 真正的浏览器桌面/手机/键盘/鼠标，以及 iframe、状态更新、产物与汇报交互。
-- 当前 Mac mini 新版 daemon 与真实 Engy 的独立复核。
-- 实际 Cloudflare 用户入口的登录、渲染和恢复后的业务可用性。
+验收发现 macOS 已安装的 headless-shell 不能稳定启动，完整 Chromium channel 的实际渲染可用；测试与独立验证器改用该 channel。此前受限会话的编译与进程内测试没有被当作真实验收，本轮已补齐运行证据。
+
+实际故障验收还复现了重启后的短暂失败会把事件从 proving 改回 diagnosing，随后业务恢复却不再自动验证的问题。编排器现会在这两种状态下对连续三次健康采样触发独立证明，已有针对该路径的回归测试。
+
+线上复跑捕获一次真实 502，时间与平台自动重启 Cloudflare tunnel 一致。两次公网探测超时触发了该动作，但本地 connector 指标仍为两条连接。现有证据不足以授权这种重启，监控插件已改为默认 `restartAllowed:false`；`REFBOX_ALLOW_TUNNEL_RESTART=true` 才显式开启。保留公网故障、独立诊断和验收，不删除失败记录；没有重配 Cloudflare 或网络代理。对应本机诊断记录为 `var/live-gateway-diagnostics.json`。
+
+随后复跑的状态接口返回 200，但每两秒传送完整 SSE 快照与串行刷新导致可见反馈超时：实测快照约 339 KB、读取需 6–22 秒。界面现直接采用服务器确认的状态，并行刷新快照和原生历史；快照/事件流传输增加压缩，内容不变时只发送心跳。新增浏览器测试挂住后续快照请求，仍须看到已确认的状态，不能把网络等待误报为状态保存失败。
+
+最终线上快照实测 358128 字节压缩为 59463 字节，公开读取 200、约 1.2 秒；证据为 `var/live-transport-acceptance.json`。实际入口故障事件 `inc_c7f258ab3de436616b4ab728` 随后由独立 verifier conversation `112` 验证闭合：新的固定指标/公开 HTTP/真实浏览器检查通过，附有三条实际连续健康记录，`verification=pass`。此前两条格式不合规复核与一次探针超时的失败仍保留，记录为 `var/cf-live-incident-retry.json`；没有人为改写历史结论或追加重启。
 
 ## 在目标机器应用
 
@@ -38,4 +49,4 @@
 4. 在可管理系统服务的会话中执行既有 launchd 安装命令；部署为用户决定，不能由监控 agent 自行升级平台。
 5. 执行真实 TCP、浏览器及受控故障验收，检查证据和两次上限，再在相关 issue 上记录实际结果。
 
-本次未关闭 UI、状态、Prove It、插件四项 issue；代码实现不等于已经通过线上使用验收。复杂业务客户端、插件市场、图编辑器、远程执行器选择与其他业务任务的自动验收适配器后续推进。
+本轮完成平台基础的部署与上述真实验收。UI/UX 满意度、领域验证覆盖和横向规模仍按对应 issue 继续演化；不会把基础验收宣称为全部长期需求完成。复杂业务客户端、插件市场、图编辑器、远程执行器选择与其他业务任务的自动验收适配器后续推进。

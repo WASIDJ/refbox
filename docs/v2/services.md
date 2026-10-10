@@ -23,7 +23,9 @@
 
 每 15 秒从 Go `/internal/resources` 读取当前注册资源，执行固定的 HTTP body、JSON 路径或 Prometheus 指标断言，把方法、结果、采样时间、资源版本和环境回报平台。HTTP 200 本身没有证明力；例如 `cloudflared_tunnel_ha_connections >= 1` 才说明连接存在。采集器不调用 Pi，也不执行修复命令，Pi 下线不影响采集。
 
-默认监控 Mac mini 的真实机器指标，Pi 的实际健康接口，Go 控制层的独立健康接口，以及 Cloudflare 实际连接数。配置 public URL 后，控制和入口资源的固定检查增加部署后的用户路径。资源修复权限只声明为命名 service ID `engine`、`control`、`tunnel`；其对应的固定 launchd 标签与最多两次修复限制由平台和 broker 控制。
+默认监控 Mac mini 的真实机器指标，Pi 的实际健康接口，Go 控制层的独立健康接口，以及 Cloudflare 实际连接数。配置 public URL 后，控制和入口资源的固定检查增加部署后的用户路径。默认插件仅为命名 service ID `engine` 开启自动重启；Mac mini、控制层和 Cloudflare 入口均不声明自动重启权限。固定 launchd 标签白名单与每事件最多两次修复限制由平台和 broker 控制。
+
+公开路径超时或健康检查失败不代表 Cloudflare connector 本身故障，不能据此自动重启正常连接的入口。当前部署沿用已有 Cloudflare，持续记录公开路径与连接数证据，恢复后重新验证。未来确需授予 connector 重启权限时，必须在监控进程环境中明确设置 `REFBOX_ALLOW_TUNNEL_RESTART=true`；未设置、`false` 或其他值均保持禁用。这个开关只声明权限，不修改 Cloudflare 配置、代理或 Tailscale。
 
 采样存入监控插件自己的 SQLite；平台管理健康趋势、事件和闭合状态，两者不共用表。
 
@@ -31,11 +33,11 @@
 
 ## 独立证明
 
-验证器 `/verify` 只接受自己的 Bearer token。收到请求后重新读取平台注册标准，拒绝调用方替换 check、资源版本或环境。它执行新探针，确认至少三次**平台已有的**连续健康采样，再创建独立 Pi 会话供模型只读复核。调用方声称的 `healthySamples` 不被当作依据。复核期间资源变更、样本过时、模型超时、无效 JSON、缺少会话来源都会保持 `inconclusive`；固定功能检查失败或模型明确拒绝是 `fail`。
+验证器 `/verify` 只接受自己的 Bearer token。收到请求后重新读取平台注册标准，拒绝调用方替换 check、资源版本或环境。它执行新探针，再用专用平台 token 从 `/internal/observations?resourceId=...` 读取至少三条实际连续健康记录，要求资源、版本、环境一致，采样在 45 秒内且能力可用，然后创建独立 Pi 会话供模型只读复核。调用方声称的 `healthySamples` 不被当作依据；平台计数也不能替代实际记录。复核期间资源变更、样本过时、模型超时、无效 JSON、缺少会话来源都会保持 `inconclusive`；固定功能检查失败或模型明确拒绝是 `fail`。
 
-通过条件是固定功能断言全部通过、样本新鲜且连续健康、独立模型返回明确同意。证据包含 resource/incident/action/version/environment、每个检查的时间与方法，以及独立 reviewConversationId。会话持久化，模型没有 CodingTools 或 ExecutionEnv。核心再把返回证据绑定到动作与事件，判断是否可以关闭。
+通过条件是固定功能断言全部通过、样本新鲜且连续健康、独立模型返回明确同意。证据包含 resource/incident/action/version/environment、每个检查的时间与方法、三条真实监控记录，以及独立 reviewConversationId。HTTP witness 保存实际状态、最多 4 KiB 的响应摘要、完整响应体 SHA-256、JSON 字段或指标的实际观察值；浏览器 witness 保存最终 URL、可见选择器及实际文本。监控记录可以早于本次请求，本次功能检查必须在请求之后独立执行。会话持久化，模型没有 CodingTools 或 ExecutionEnv。核心再把返回证据绑定到动作与事件，判断是否可以关闭。
 
-`check.browser` 是固定的真实 UI 标准，包含 `selector`、可选 `text` 和可选 `passwordEnv`。它通过独立 Playwright context 访问实际部署 URL 并检查渲染后的元素。已登录控制层的标准选择器是 `[data-testid="platform-shell"]`。`REFBOX_VERIFY_PASSWORD` 是专用于验证器的**应用登录凭据**，不是系统 root 密码。缺少该凭据、浏览器或模型时不会自动通过。测试可通过 `npx playwright install chromium` 在允许联网和安装的环境准备浏览器。浏览器标准与 HTTP 标准必须分成不同 check，不能混在一个 check 里。
+`check.browser` 是固定的真实 UI 标准，包含 `selector`、可选 `text` 和可选 `passwordEnv`。它通过独立 Playwright Chromium context 访问实际部署 URL 并检查渲染后的元素。默认部署标准要求看到 `[data-resource-id="refbox-engine"]` 和“Pi 执行服务”，确认登录后的资源视图实际加载。`REFBOX_VERIFY_PASSWORD` 是专用于验证器的**应用登录凭据**，不是系统 root 密码。缺少该凭据、浏览器或模型时不会自动通过。测试可通过 `npx playwright install chromium` 在允许联网和安装的环境准备浏览器。浏览器标准与 HTTP 标准必须分成不同 check，不能混在一个 check 里。
 
 ## 随手记插件验证横向扩展
 
@@ -45,6 +47,6 @@
 
 无网络测试：`node --test apps/services/test/in-process.test.mjs`，调用真实 Node 服务路由，覆盖鉴权、SQLite 重启、幂等写入、SSE、200 但业务坏、独立采集和不允许虚假通过。独立 Pi SQLite 与过时证据测试：`node --test --test-name-pattern='real Pi Durable|verifier cannot reuse' apps/services/test/services.test.mjs`。
 
-真实 TCP 集成测试：`node --test apps/services/test/services.test.mjs`。当前执行沙箱禁止 loopback 监听（`listen EPERM`），因此 TCP 和真实浏览器验收需要在允许监听的目标环境完成。进程内路由测试通过不能替代部署后端到端验收。
+真实 TCP 集成测试：`npm run test:services:tcp`。2026-10-10 当前机器已通过全部 13 项，包括真实响应证据、平台健康记录读取、独立 Pi 会话，以及鉴权、历史、时间或版本不足时拒绝通过。跨进程真实 Engy 与命名 launchctl 修复闭环已通过八项场景，见 [真实服务闭环验收](live-services.md)；现有 Cloudflare 公开入口和实际 Chromium 交互验收见 [真实界面验收](ui-live.md)。进程内路由测试通过不能替代这些部署验收。
 
-隔离故障 fixture 永远不调用 launchctl，不作为真实机器修复白名单。默认第一次启动业务损坏但 HTTP 200；重启后独立业务恢复，启动次数保存在数据库中。`REFBOX_FAULT_MODE=always-broken` 可验证达到两次修复限制后仍不恢复的路径。
+隔离故障 fixture 自身不调用 launchctl；跨进程验收器仅把自己的随机临时标签交给生产实现的命名 broker，不把任何真实机器服务加入验收白名单。默认第一次启动业务损坏但 HTTP 200；实际重启后独立业务恢复，启动次数保存在数据库中。`REFBOX_FAULT_MODE=always-broken` 可验证达到两次修复限制后仍不恢复的路径。

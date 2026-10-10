@@ -8,6 +8,7 @@ Refbox 是 Agent 和独立个人业务的 Homelab 工作台。长期任务只是
 - **修复事件**：显示诊断、预授权修复、独立验证、关闭进展。最多两次重启，次数耗尽后仍能诊断和重新验证。健康样本不能自行表示事件关闭。Agent 的独立只读诊断状态、摘要与记录 ID 在事件详情持续显示，诊断建议与验证证据分别呈现。
 - **证据**：通过、失败、证据不足、人工判断分别显示。展开能看到资源、动作、版本、环境、采样时间、检查结果和独立审查会话。只有 HTTP 200 的结果不能展示为已恢复。
 - **长期任务**：按业务状态组织看板，在每张卡与详情里同时显示任务、执行、验证状态。状态更改提交真实接口并显示错误；通用任务可以由人检查并留下理由，标记为人工验收，不升级成独立验证通过。
+- **状态反馈**：状态保存和人工验收使用服务端返回的真实任务更新徽标，不等待后续历史与全局快照加载；不在请求成功前乐观标记完成。历史与快照刷新并行，减少实际公共入口延迟叠加。
 - **任务详情**：保留计划、确认、停止、继续、补充指引、原生运行记录、实验、产物、执行检查和每日汇报。历史检查与独立证据分别解释。
 - **插件**：登记版本化 Manifest，显示资源、工具、事件、验证能力。停用或离线仍可看到注册记录和错误。通过同源控制代理加载插件工作区，iframe 保持不带 `allow-same-origin` 的 sandbox。工具参数经核心中声明的工具接口调用，业务数据仍由独立服务持有。Manifest 可声明工具的 `method: GET | POST`；浏览器始终提交到核心工具接口，由核心按声明执行请求。
 
@@ -19,13 +20,16 @@ Refbox 是 Agent 和独立个人业务的 Homelab 工作台。长期任务只是
 
 ## 验证
 
-`npm --workspace @refbox/web run build -- --configLoader runner` 已通过 TypeScript 和生产构建。`node apps/web/test/api-check.mjs` 已通过网络中断与服务端 503 后的请求回执复用、成功后的新动作、拒绝输入和空错误响应检查。回执只保存在当前页面内存，重新加载页面会失去待确认回执。附带 Playwright 测试以 route 直接返回真实构建文件，避免要求额外监听服务器：
+`npm --workspace @refbox/web run build` 已通过 TypeScript 和生产构建。`node apps/web/test/api-check.mjs` 已通过网络中断与服务端 503 后的请求回执复用、成功后的新动作、拒绝输入和空错误响应检查。回执只保存在当前页面内存，重新加载页面会失去待确认回执。附带 Playwright 回归使用实际 Chromium 和真实构建文件，API 为模拟路由，避免要求额外监听服务器：
 
 1. 样本过期、执行角色离线、两次重启上限、证据不足、重新验证。
-2. 业务状态失败、继续/停止、真实产物读取、汇报、人工验收依据。
+2. 业务状态失败、继续/停止、产物读取交互、汇报、人工验收依据。
 3. 插件离线记录、注册失败、工作区代理、工具能力调用。
 4. 键盘登录、默认 kimi-k3、1440/1024/768/375 布局、Escape。
+5. 全局快照请求故意挂起时，已得到服务端确认的业务状态仍能立即显示。
 
-当前受限环境在创建 Chromium 时被 macOS `bootstrap_check_in MachPortRendezvousServer Permission denied (1100)` 拒绝，因此以上浏览器交互、截图和视觉验收**尚未完成**，不能据生产构建声称 UI 已通过验收。可在允许启动浏览器的环境运行 `npm --workspace @refbox/web test`；测试成功后截图会保存到 `var/screenshots/platform-desktop.png` 和 `platform-mobile.png`。
+2026-10-10 部署会话已允许启动浏览器，以上五项回归全部通过并已查看桌面和手机截图。当前测试使用完整 Chromium channel，避开本机独立 headless-shell 的 GPU helper 故障；未跳过 UI 断言。`npm --workspace @refbox/web test` 的模拟回归截图位于 `var/screenshots/platform-desktop.png` 和 `platform-mobile.png`。
 
-生产路径检查单独 opt-in：`REFBOX_LIVE_TEST=1 REFBOX_TEST_URL=https://refbox.jeffkafka.top npm --workspace @refbox/web test -- --grep 'live deployment'`。它只登录、查看历史检查和产物，不批准任务、不重启服务、不修改验收状态。运行时需设置应用登录凭据；不能使用机器 root 密码替代。
+生产检查单独 opt-in：`REFBOX_LIVE_TEST=1 REFBOX_TEST_URL=https://refbox.jeffkafka.top npm --workspace @refbox/web test -- --grep 'live deployment'`。第一项经现有 Cloudflare 登录，查看实际历史检查和产物；第二项创建明确标记的界面回归目标，验证状态修改、刷新持久化、未验证完成拒绝和人工验收，并真实写入/读回插件笔记，检查手机和退出路径。不会批准 Agent 执行或重启服务。正常测试不操作线上数据；运行时使用应用登录凭据，不能使用机器 root 密码替代。
+
+生产截图、验收数据与最新复测结果见 [浏览器界面验收](ui-live.md)。部署复测暴露并修正了连接器默认自动重启、完整快照重复传输、状态反馈等待全局刷新导致的可用性和延迟问题。最终两项真实生产浏览器检查同时通过（26.9 秒）；仍保留之前真实失败和测试数据，模拟回归没有替代生产验收。

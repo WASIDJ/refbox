@@ -129,8 +129,8 @@ npm run test:services:tcp
 
 npm test 使用实际 Pi Durable、文件工具、独立 SQLite、进程崩溃，以及进程内 HTTP 处理器。覆盖计划门槛、持续迭代、恢复去重、只读诊断范围、固定功能检查、独立模型复核、两次动作上限、过期证据和业务/执行/验证状态区别。
 
-浏览器套件包含桌面、移动、键盘、状态操作、插件工作区与错误反馈，默认使用隔离 mock 路由，不修改生产服务。`REFBOX_LIVE_TEST=true` 可启用已部署入口的人工准备任务验收。安装真实浏览器需 `npx playwright install chromium`。
+浏览器套件包含桌面、移动、键盘、状态操作、插件工作区与错误反馈，默认使用隔离 mock 路由，不修改生产服务。`REFBOX_LIVE_TEST=1 REFBOX_TEST_URL=https://refbox.jeffkafka.top npm --workspace @refbox/web test -- --grep 'live deployment'` 可显式启用生产验收；它会创建带 `[验收]` 标记的任务与随手记，不启动模型执行。安装真实浏览器需 `npx playwright install chromium`。隔离的真实故障闭环见 [服务验收](docs/v2/live-services.md)。
 
-本次开发环境禁止本地监听和 Chromium 启动，因而真实 TCP、页面交互与 Cloudflare 部署尚未验收；构建通过不能代替这些验收。交付与尚待验证项见 [验收记录](docs/v2/acceptance.md)。控制层、监控、验证器均与执行器同机；root 可以修改它们，这提供角色分离与可追溯证据，不宣称抵抗同机恶意 root。
+2026-10-10 已部署到当前 Mac mini，沿用现有 Cloudflare 入口。实际 TCP、八项跨进程故障闭环、桌面与手机浏览器、独立 Engy 复核，以及 root Agent 产物验收通过；原有运行历史保留。证据与实际边界见 [验收记录](docs/v2/acceptance.md)。控制层、监控、验证器均与执行器同机；root 可以修改它们，这提供角色分离与可追溯证据，不宣称抵抗同机恶意 root。
 
 需求与后续验收：[状态操作 #2](https://github.com/WASIDJ/refbox/issues/2)、[UI/UX #3](https://github.com/WASIDJ/refbox/issues/3)、[独立验证 #4](https://github.com/WASIDJ/refbox/issues/4)、[插件架构 #5](https://github.com/WASIDJ/refbox/issues/5)。
