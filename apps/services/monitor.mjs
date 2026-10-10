@@ -220,6 +220,7 @@ export class MonitorCollector {
             [...new Set(probes.map((p) => p.method))].join("+") ||
             "unavailable",
           healthy: probes.length > 0 && probes.every((p) => p.passed),
+          unavailable: probes.length === 0 || probes.some((p) => p.unavailable),
           detail:
             probes.map((p) => `${p.id}: ${p.detail}`).join(" | ") ||
             "没有可用的固定功能探针",

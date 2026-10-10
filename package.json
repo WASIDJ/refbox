@@ -8,7 +8,7 @@
   "scripts": {
     "build": "npm run build --workspaces && mkdir -p bin && go build -o bin/refbox ./cmd/refbox && go build -o bin/refbox-broker ./cmd/refbox-broker",
     "test": "npm test --workspace apps/runtime && npm run test:services && node apps/web/test/api-check.mjs && go test -race ./...",
-    "test:services": "node --test apps/services/test/in-process.test.mjs && node --test --test-name-pattern='real Pi Durable|verifier cannot reuse' apps/services/test/services.test.mjs",
+    "test:services": "node --test apps/services/test/in-process.test.mjs apps/services/test/unavailable.test.mjs && node --test --test-name-pattern='real Pi Durable|verifier cannot reuse' apps/services/test/services.test.mjs",
     "test:services:tcp": "node --test apps/services/test/services.test.mjs",
     "dev:services": "node scripts/start-services.mjs",
     "dev:runtime": "npm run dev --workspace apps/runtime",

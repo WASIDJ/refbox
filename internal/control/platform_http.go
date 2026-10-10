@@ -855,5 +855,37 @@ func (s *Server) platformTaskAPI(w http.ResponseWriter, r *http.Request, parts [
 	}
 	copyReq := r.Clone(r.Context())
 	copyReq.URL.Path = "/api/tasks/" + url.PathEscape(t.ConversationID) + "/" + action
+	if r.Method == "POST" {
+		response, err := s.engineRequest(r.Context(), "POST", copyReq.URL.Path, r.Body, r.Header.Get("Idempotency-Key"))
+		if err != nil {
+			jsonError(w, 503, "Pi 暂不可用；相同请求可安全重试")
+			return
+		}
+		defer response.Body.Close()
+		raw, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
+		if err != nil {
+			jsonError(w, 503, "执行响应尚未确认；相同请求可安全重试")
+			return
+		}
+		if response.StatusCode < 300 {
+			var native nativeTask
+			if json.Unmarshal(raw, &native) != nil || native.ID != t.ConversationID {
+				jsonError(w, 503, "执行响应与业务任务映射不一致")
+				return
+			}
+			if err = s.platform.syncTasks([]nativeTask{native}, true); err == nil {
+				err = s.platform.completeBusinessCommand(t.ID, action, r.Header.Get("Idempotency-Key"), native)
+			}
+			if err != nil {
+				jsonError(w, 500, "执行已受理，业务状态尚未保存；相同请求可安全重试")
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(response.StatusCode)
+		_, _ = w.Write(raw)
+		return
+	}
 	s.proxy.ServeHTTP(w, copyReq)
 }

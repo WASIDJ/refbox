@@ -171,18 +171,20 @@ type Observation struct {
 	Detail        string `json:"detail"`
 	Version       string `json:"version"`
 	EnvironmentID string `json:"environmentId"`
+	Unavailable   bool   `json:"unavailable,omitempty"`
 }
 type platformState struct {
-	Schema       int                      `json:"schema"`
-	Plugins      map[string]*Plugin       `json:"plugins"`
-	Credentials  map[string]string        `json:"credentials"`
-	Resources    map[string]*Resource     `json:"resources"`
-	Incidents    map[string]*Incident     `json:"incidents"`
-	Tasks        map[string]*PlatformTask `json:"tasks"`
-	Workers      map[string]*Worker       `json:"workers"`
-	Evidence     []*Evidence              `json:"evidence"`
-	Events       []*Event                 `json:"events"`
-	Observations []Observation            `json:"observations"`
+	Schema          int                      `json:"schema"`
+	Plugins         map[string]*Plugin       `json:"plugins"`
+	Credentials     map[string]string        `json:"credentials"`
+	Resources       map[string]*Resource     `json:"resources"`
+	Incidents       map[string]*Incident     `json:"incidents"`
+	Tasks           map[string]*PlatformTask `json:"tasks"`
+	Workers         map[string]*Worker       `json:"workers"`
+	Evidence        []*Evidence              `json:"evidence"`
+	Events          []*Event                 `json:"events"`
+	Observations    []Observation            `json:"observations"`
+	CommandReceipts map[string]bool          `json:"commandReceipts"`
 }
 type Snapshot struct {
 	Plugins   []*Plugin       `json:"plugins"`
@@ -271,6 +273,9 @@ func OpenPlatform(path string) (*Platform, error) {
 	}
 	for id, plugin := range p.state.Plugins {
 		plugin.CredentialEnv = p.state.Credentials[id]
+	}
+	if p.state.CommandReceipts == nil {
+		p.state.CommandReceipts = map[string]bool{}
 	}
 	for _, i := range p.state.Incidents {
 		if i.Status == "acting" {
@@ -493,7 +498,11 @@ func (p *Platform) observe(o Observation) (string, error) {
 		r.SampledAt = o.SampledAt
 		r.Method = o.Method
 		r.Detail = o.Detail
-		if o.Healthy {
+		if o.Unavailable {
+			r.Health = "unknown"
+			r.Failures = 0
+			r.HealthySamples = 0
+		} else if o.Healthy {
 			r.Health = "healthy"
 			r.HealthySamples++
 			r.Failures = 0
@@ -507,6 +516,12 @@ func (p *Platform) observe(o Observation) (string, error) {
 			p.state.Observations = p.state.Observations[len(p.state.Observations)-5000:]
 		}
 		i := p.active(r.ID)
+		if o.Unavailable && i != nil && i.Status != "acting" {
+			i.Status = "attention"
+			i.Verification = "inconclusive"
+			i.Reason = "观测能力不可用，需要恢复采样：" + o.Detail
+			i.UpdatedAt = instant()
+		}
 		if i == nil && r.Failures >= 2 {
 			i = &Incident{ID: identifier("inc_"), ResourceID: r.ID, Status: "diagnosing", OpenedAt: instant(), UpdatedAt: instant(), Reason: o.Detail, Verification: "pending", Version: r.Version, EnvironmentID: r.EnvironmentID}
 			p.state.Incidents[i.ID] = i
@@ -575,7 +590,11 @@ func (p *Platform) syncTasks(tasks []nativeTask, available bool) error {
 			t.Goal = n.Goal
 			t.Cwd = n.Cwd
 			t.Model = n.Model
+			previousExecution := t.ExecutionStatus
 			t.ExecutionStatus = n.Status
+			if previousExecution != n.Status && t.BusinessStatus == "active" && (n.Status == "blocked" || n.Status == "awaiting_confirmation" || (n.Status == "completed" && t.VerificationStatus != "pass" && t.VerificationStatus != "manual")) {
+				t.BusinessStatus = "attention"
+			}
 			t.CreatedAt = n.CreatedAt
 			if t.UpdatedAt < n.UpdatedAt {
 				t.UpdatedAt = n.UpdatedAt
@@ -626,6 +645,29 @@ func (p *Platform) acceptTask(id, reason string) error {
 		t.AcceptedAt = instant()
 		t.UpdatedAt = t.AcceptedAt
 		p.event("task.manual_acceptance", "", "", t.Title+"："+reason)
+		return nil
+	})
+}
+func (p *Platform) completeBusinessCommand(id, action, key string, native nativeTask) error {
+	return p.mutate(func() error {
+		receipt := id + ":" + action + ":" + key
+		if p.state.CommandReceipts[receipt] {
+			return nil
+		}
+		t := p.state.Tasks[id]
+		if t == nil {
+			return errors.New("unknown task")
+		}
+		if action == "plan" || action == "approve" || action == "continue" {
+			if t.VerificationStatus != "manual" {
+				t.BusinessStatus = "active"
+				if native.Status == "completed" || native.Status == "blocked" || native.Status == "awaiting_confirmation" {
+					t.BusinessStatus = "attention"
+				}
+			}
+			t.UpdatedAt = instant()
+		}
+		p.state.CommandReceipts[receipt] = true
 		return nil
 	})
 }

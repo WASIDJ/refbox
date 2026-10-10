@@ -13,7 +13,7 @@
 
 ## 自动验证
 
-`npm test` 通过：原生 Pi 9 项；独立服务 8 项；Go 控制层 13 项；broker 6 项实质测试（另有 SIGKILL 子进程辅助入口）；前端 API 请求重试检查通过。真实 SQLite、文件操作、SIGKILL 和 HTTP 处理器被实际执行。独立模型流程测试使用可控 provider，证明工具范围与持久会话行为，没有把它称为真实 Engy 验收。
+`npm test` 通过：原生 Pi 9 项；独立服务 9 项；Go 控制层 15 项；broker 6 项实质测试（另有 SIGKILL 子进程辅助入口）；前端 API 请求重试检查通过。真实 SQLite、文件操作、SIGKILL 和 HTTP 处理器被实际执行。独立模型流程测试使用可控 provider，证明工具范围与持久会话行为，没有把它称为真实 Engy 验收。
 
 `npm run build` 通过，生成 React 生产文件、Node 执行器以及 Go control/broker 可执行文件。配置再次运行不覆盖原凭据，各服务 token 互异；安装清单校验通过。
 

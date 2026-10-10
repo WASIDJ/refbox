@@ -289,6 +289,12 @@ export async function prove(
       platformSampledAt: registered.sampledAt,
       checks,
       fixedCriteria: fixed,
+      resource: {
+        id: registered.id,
+        name: registered.name,
+        kind: registered.kind,
+        pluginId: registered.pluginId,
+      },
     });
   } catch {
     return { ...base, summary: "独立模型复核失败；保持事件开放。" };

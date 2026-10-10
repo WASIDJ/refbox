@@ -101,7 +101,12 @@ export async function httpProbe(
       redirect: "error",
       signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!response.ok) return { ...result, detail: `HTTP ${response.status}` };
+    if (!response.ok)
+      return {
+        ...result,
+        unavailable: response.status === 401 || response.status === 403,
+        detail: `HTTP ${response.status}`,
+      };
     const text = await limitedText(response);
     const outcomes = [];
     if (check.contains) outcomes.push(text.includes(check.contains));

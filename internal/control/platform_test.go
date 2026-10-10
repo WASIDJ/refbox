@@ -49,7 +49,7 @@ func sample(t *testing.T, p *Platform, healthy bool) string {
 	if !at.After(prior) {
 		at = prior.Add(time.Nanosecond)
 	}
-	id, e := p.observe(Observation{"engine", at.Format(time.RFC3339Nano), "http_body", healthy, "business probe", "1", "macmini"})
+	id, e := p.observe(Observation{ResourceID: "engine", SampledAt: at.Format(time.RFC3339Nano), Method: "http_body", Healthy: healthy, Detail: "business probe", Version: "1", EnvironmentID: "macmini"})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -169,7 +169,7 @@ func TestStaleEvidenceAndWrongScopeCannotClose(t *testing.T) {
 	if i.Verification != "inconclusive" || i.Status == "closed" {
 		t.Fatal("stale proof accepted")
 	}
-	wrong := Observation{"engine", instant(), "http_body", true, "", "2", "macmini"}
+	wrong := Observation{ResourceID: "engine", SampledAt: instant(), Method: "http_body", Healthy: true, Version: "2", EnvironmentID: "macmini"}
 	if _, e := p.observe(wrong); e == nil {
 		t.Fatal("wrong version observation admitted")
 	}
@@ -398,6 +398,60 @@ func TestFailedPersistenceDoesNotExposeUncommittedRegistry(t *testing.T) {
 	}
 }
 
+func TestExecutionCommandsConnectBusinessStatusAndPreserveManualChanges(t *testing.T) {
+	s, e := New(configForTest("http://127.0.0.1:18801"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Close()
+	native := nativeTask{ID: "32", Title: "newgoal", CreatedAt: instant(), UpdatedAt: instant(), Status: "awaiting_confirmation"}
+	_ = s.platform.syncTasks([]nativeTask{native}, true)
+	task := s.platform.snapshot().Tasks[0]
+	s.client.Transport = handlerTransport{http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tasks/32/approve" || r.Header.Get("Idempotency-Key") != "approve-stable" || r.Header.Get("Cookie") != "" {
+			t.Error("command mapping/receipt/session isolation failed")
+		}
+		native.Status = "running"
+		native.UpdatedAt = instant()
+		writeJSON(w, 200, native)
+	})}
+	out := httptest.NewRecorder()
+	request := httptest.NewRequest("POST", "/api/platform/tasks/"+task.ID+"/approve", strings.NewReader(`{}`))
+	request.Header.Set("Idempotency-Key", "approve-stable")
+	s.platformTaskAPI(out, request, []string{"api", "platform", "tasks", task.ID, "approve"})
+	current, _ := s.platform.task(task.ID)
+	if out.Code != 200 || current.BusinessStatus != "active" || current.ExecutionStatus != "running" {
+		t.Fatal("starting execution left task in backlog")
+	}
+	_ = s.platform.status(task.ID, "backlog")
+	_ = s.platform.syncTasks([]nativeTask{native}, true)
+	current, _ = s.platform.task(task.ID)
+	if current.BusinessStatus != "backlog" {
+		t.Fatal("snapshot sync overwrote a manual classification")
+	}
+	if e = s.platform.completeBusinessCommand(task.ID, "approve", "approve-stable", native); e != nil {
+		t.Fatal(e)
+	}
+	current, _ = s.platform.task(task.ID)
+	if current.BusinessStatus != "backlog" {
+		t.Fatal("duplicate command receipt overwrote later manual classification")
+	}
+	_ = s.platform.status(task.ID, "active")
+	native.Status = "completed"
+	native.UpdatedAt = instant()
+	_ = s.platform.syncTasks([]nativeTask{native}, true)
+	current, _ = s.platform.task(task.ID)
+	if current.BusinessStatus != "attention" || current.VerificationStatus != "pending" {
+		t.Fatal("execution self-check silently completed business goal")
+	}
+	_ = s.platform.status(task.ID, "active")
+	_ = s.platform.syncTasks([]nativeTask{native}, true)
+	current, _ = s.platform.task(task.ID)
+	if current.BusinessStatus != "active" {
+		t.Fatal("unchanged execution state overwrote manual business status")
+	}
+}
+
 func TestFutureEvidenceWithdrawnResourceAndSamplingGaps(t *testing.T) {
 	p, m := platformFixture(t)
 	id := opened(t, p)
@@ -429,12 +483,25 @@ func TestFutureEvidenceWithdrawnResourceAndSamplingGaps(t *testing.T) {
 	if r.Enabled {
 		t.Fatal("withdrawn resource remained enabled")
 	}
-	if _, e := p.observe(Observation{"engine", instant(), "http_body", true, "", "1", "macmini"}); e == nil {
+	if _, e := p.observe(Observation{ResourceID: "engine", SampledAt: instant(), Method: "http_body", Healthy: true, Version: "1", EnvironmentID: "macmini"}); e == nil {
 		t.Fatal("withdrawn resource observation admitted")
 	}
 	i, _ = p.incident(id)
 	if e := p.proof(i, r, passing(Resource{Checks: []Check{{ID: "functional", URL: "http://127.0.0.1:18801/health"}}})); e == nil {
 		t.Fatal("withdrawn scope proof admitted")
+	}
+}
+
+func TestUnavailableProbeDoesNotAuthorizeRestart(t *testing.T) {
+	p, _ := platformFixture(t)
+	for range 2 {
+		if _, e := p.observe(Observation{ResourceID: "engine", SampledAt: instant(), Method: "http_json", Detail: "probe credentials missing", Version: "1", EnvironmentID: "macmini", Unavailable: true}); e != nil {
+			t.Fatal(e)
+		}
+	}
+	r, _ := p.resource("engine")
+	if r.Health != "unknown" || r.Failures != 0 || len(p.snapshot().Incidents) != 0 {
+		t.Fatal("unavailable probe became a service failure and authorized repair")
 	}
 }
 
