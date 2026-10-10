@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,14 +17,17 @@ import { Engine } from "../src/engine.js";
 import { BoardDoc } from "../src/state.js";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { runtimeServer } from "../src/server.js";
+import type { PlatformOptions } from "../src/platform.js";
+import { InProcessTransport } from "../../services/test/transport.mjs";
 
 const engines: Engine[] = [];
 const dirs: string[] = [];
 afterEach(async () => {
   for (const engine of engines.splice(0)) await engine.close();
   for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true });
+  vi.unstubAllGlobals();
 });
-async function fixture(storage?: MemoryStorage) {
+async function fixture(storage?: MemoryStorage, platform?: PlatformOptions) {
   const dir = await mkdtemp(join(tmpdir(), "refbox-test-"));
   dirs.push(dir);
   const faux = fauxProvider();
@@ -34,6 +37,7 @@ async function fixture(storage?: MemoryStorage) {
     models,
     faux.getModel().id,
     faux.provider.id,
+    platform,
   ).open(storage ?? new MemoryStorage());
   engines.push(engine);
   return { engine, faux, dir };
@@ -86,6 +90,7 @@ describe("Pi Durable integration", () => {
     const completed = await engine.task(t.id);
     expect(completed.verified).toBe(true);
     expect(completed.verifications[0].exitCode).toBe(0);
+    expect(completed.verifications[0].assurance).toBe("execution_assertion");
     expect(completed.experiments[0].evidenceEntries.length).toBeGreaterThan(0);
     expect((await engine.readArtifact(t.id, "result.txt")).toString()).toBe(
       "verified",
@@ -206,30 +211,44 @@ describe("Pi Durable integration", () => {
     const { engine, dir } = await fixture();
     const token = "a".repeat(40);
     const server = runtimeServer(engine, token);
-    await new Promise<void>((resolve) =>
-      server.listen(0, "127.0.0.1", resolve),
-    );
-    const addr = server.address();
-    if (!addr || typeof addr === "string") throw Error("server");
-    const url = `http://127.0.0.1:${addr.port}`;
+    const transport = new InProcessTransport();
+    const url = transport.register(server);
+    // The test transport signals cancellation on its request stream. Real HTTP
+    // signals response.close too; bridge it so the actual SSE cleanup runs.
+    server.on("request", (req, res) => req.once("close", () => res.emit("close")));
+    const headers = { Authorization: "Bearer " + token };
+    const snapshot = async () => {
+      const response = await transport.fetch(url + "/api/events", { headers });
+      const reader = response.body!.getReader();
+      try {
+        const chunk = await reader.read();
+        return new TextDecoder().decode(chunk.value);
+      } finally {
+        await reader.cancel();
+      }
+    };
     try {
-      expect((await fetch(url + "/api/tasks")).status).toBe(401);
+      expect((await transport.fetch(url + "/api/tasks")).status).toBe(401);
+      expect((await transport.fetch(url + "/api/events")).status).toBe(401);
+      const health = await transport.fetch(url + "/api/health", { headers });
+      expect((await health.json()).readiness).toBe("ready");
       await engine.create(
         { title: "断线后可见", goal: "保持状态", cwd: dir },
         "sse-task-123",
       );
-      const abort = new AbortController();
-      const res = await fetch(url + "/api/events", {
-        headers: { Authorization: "Bearer " + token },
-        signal: abort.signal,
-      });
-      const reader = res.body!.getReader();
-      const first = await reader.read();
-      expect(new TextDecoder().decode(first.value)).toContain("断线后可见");
-      abort.abort();
+      expect(await snapshot()).toContain("断线后可见");
+      expect(engine.listeners.size).toBe(0);
+      await engine.create(
+        { title: "重连后新增任务", goal: "重连得到当前状态", cwd: dir },
+        "sse-task-new-123",
+      );
+      const reconnect = await snapshot();
+      expect(reconnect).toContain("断线后可见");
+      expect(reconnect).toContain("重连后新增任务");
+      expect(engine.listeners.size).toBe(0);
     } finally {
-      server.closeAllConnections();
-      await new Promise<void>((r) => server.close(() => r()));
+      transport.remove(url);
+      server.removeAllListeners();
     }
   });
   it("reacquires an admitted command after reopen without resetting a completed task", async () => {
@@ -319,4 +338,79 @@ describe("Pi Durable integration", () => {
       (await readFile(join(dir, "attempts.txt"), "utf8")).trim().split("\n"),
     ).toHaveLength(1);
   }, 15000);
+});
+
+describe("Scoped platform diagnosis", () => {
+  it("uses a separate native conversation and cannot execute shell, mutate plugins or leave resource scope", async () => {
+    const calls: { path: string; body: Record<string, unknown> }[] = [];
+    const token = "p".repeat(40);
+    vi.stubGlobal("fetch", async (url: URL, options: RequestInit) => {
+      expect(new Headers(options.headers).get("authorization")).toBe("Bearer " + token);
+      const path = url.pathname + url.search;
+      const input = options.body ? JSON.parse(String(options.body)) : {};
+      if (options.method === "POST") calls.push({ path, body: input });
+      if (path === "/internal/resources") return Response.json([
+        { id: "nas", pluginId: "monitor", version: "v1", environmentId: "home" },
+        { id: "notes", pluginId: "scratchpad", version: "v1", environmentId: "home" },
+      ]);
+      if (path === "/internal/plugins") return Response.json([
+        { id: "monitor", enabled: true, manifest: { tools: [
+          { id: "read_health", mutates: false }, { id: "restart", mutates: true },
+        ] } },
+        { id: "scratchpad", enabled: true, manifest: { tools: [{ id: "read", mutates: false }] } },
+      ]);
+      if (path === "/internal/observations?resourceId=nas") return Response.json({ resourceId: "nas", healthy: false });
+      if (path === "/internal/plugins/monitor/tools/read_health") return Response.json({ resourceId: "nas", status: "unhealthy" });
+      return Response.json({}, { status: 404 });
+    });
+      const { engine, faux, dir } = await fixture(undefined, { url: "http://127.0.0.1:8080", token });
+      const task = await engine.create({ title: "普通任务", goal: "保留原有权限模型", cwd: dir }, "task-before-diagnosis");
+      faux.setResponses([
+        tool("bash", { command: `touch '${join(dir, "unauthorized")}'` }),
+        tool("platform_call_tool", { pluginId: "monitor", toolId: "restart" }),
+        tool("platform_read_tool", { pluginId: "monitor", toolId: "restart" }),
+        tool("platform_read_tool", { pluginId: "scratchpad", toolId: "read" }),
+        tool("platform_observe", { resourceId: "notes" }),
+        tool("platform_observe", {}),
+        tool("platform_read_tool", { pluginId: "monitor", toolId: "read_health", input: { resourceId: "notes" } }),
+        fauxAssistantMessage([fauxText("NAS 检查失败；建议进一步核对服务进程，未执行修复。")]),
+      ]);
+      const input = { incidentId: "incident-nas", resourceId: "nas", version: "v1", environmentId: "home", observations: { healthy: false } };
+      const d = await engine.diagnose(input, "diagnosis-1111");
+      await waitFor(async () => (await engine.diagnosis(d.id)).status === "completed");
+      expect(d.conversationId).not.toBe(task.id);
+      expect((await engine.board()).tasks[d.conversationId]).toBeUndefined();
+      expect((await engine.task(task.id)).status).toBe("draft");
+      await expect(readFile(join(dir, "unauthorized"))).rejects.toThrow();
+      expect(calls).toHaveLength(1);
+      expect(calls[0].path).toBe("/internal/plugins/monitor/tools/read_health");
+      expect(calls[0].body).toMatchObject({ readOnly: true, resourceId: "nas", input: { resourceId: "nas" } });
+      expect(calls[0].body._idempotencyKey).toMatch(/^pi-tool:/);
+      expect((await engine.diagnosis(d.id)).summary).toContain("未执行修复");
+      expect((await engine.diagnose(input, "diagnosis-1111")).id).toBe(d.id);
+      await expect(engine.diagnose({ ...input, resourceId: "notes" }, "diagnosis-1111")).rejects.toMatchObject({ status: 409 });
+      const conversation = (await engine.harness.conversation(Number(d.conversationId) as never, context))!;
+      expect((await conversation.agent(context)).tools.map((t) => t.name)).toEqual(["platform_observe", "platform_read_tool"]);
+  });
+
+  it("preserves completed diagnosis and idempotency after SQLite reopen", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "refbox-diagnosis-"));
+    dirs.push(dir);
+    const db = join(dir, "state.sqlite");
+    const faux = fauxProvider();
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const first = await new Engine(models, faux.getModel().id, faux.provider.id).open(await openNodeSqliteStorage(db));
+    faux.setResponses([fauxAssistantMessage([fauxText("仅基于初始观察，证据不足。")])]);
+    const input = { incidentId: "incident-1", resourceId: "service-1", version: "v1", environmentId: "home", observations: { healthy: false } };
+    const diagnosis = await first.diagnose(input, "persistent-diagnosis-1");
+    await waitFor(async () => (await first.diagnosis(diagnosis.id)).status === "completed");
+    await first.close();
+    const second = await new Engine(models, faux.getModel().id, faux.provider.id).open(await openNodeSqliteStorage(db));
+    engines.push(second);
+    expect((await second.diagnosis(diagnosis.id)).summary).toBe("仅基于初始观察，证据不足。");
+    expect((await second.diagnose(input, "persistent-diagnosis-1")).id).toBe(diagnosis.id);
+    expect((await second.readiness()).activeRuns).toBe(0);
+    expect(Object.values((await second.board()).tasks)).toHaveLength(0);
+  });
 });

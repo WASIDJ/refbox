@@ -1,60 +1,59 @@
-# refbox 的职责与扩展
+# Refbox 的平台职责与扩展
 
-## 第一版目标
-
-refbox 是 Homelab 的任务看板与控制层，也是 agent 的家。业务（财务、模型实验等）各自维护服务与数据，refbox 保存目标、控制 agent、呈现证据，并登记业务入口。
+Refbox 是个人 Homelab 的 Agent 工具桌与试验台。不同业务维护自己的数据、界面和验证标准；共享平台提供任务、执行器与验证器接入、事件、具名动作、证据索引和控制界面。长期看板、loop 与 graph 协作属于平台能力，财务、量化、NAS、copyhistory、LLM Wiki 和人际关系图属于业务插件。
 
 ```mermaid
-flowchart LR
-  Browser[React 看板] --> Go[Go 控制层]
-  Go -->|内部 HTTP / SSE| Runtime[Node / Pi Durable]
-  Runtime --> SQLite[原生 SQLite / refbox 文档]
-  Runtime --> Engy[Engy / kimi-k3]
-  Runtime --> Tools[本地工具 / 独立服务]
+flowchart TB
+  UI[React 个人工作台] --> Control[Go 控制层与平台 SQLite]
+  Control --> Pi[Pi Durable 执行服务与原生 SQLite]
+  Control --> Monitor[独立监控插件与采样 SQLite]
+  Control --> Prover[独立 Prove It Worker 与独立 Pi SQLite]
+  Control --> Broker[具名 root 动作代理与回执 SQLite]
+  Control --> Plugin[独立业务插件与自己的数据库]
+  Pi --> Engy[Engy / kimi-k3]
+  Prover --> Engy
+  Pi -->|发现声明工具| Control
+  Monitor -->|真实观测| Control
+  Plugin -->|业务 SSE 事件| Control
+  Broker -->|固定服务白名单| Service[本机 launchd 服务]
 ```
 
-Go 只负责入口、认证、转发、静态文件与日报触发，不拥有 SQLite，也不重写任务调度。Node 是数据库唯一写入者；会话、提交、执行、重试、压缩、恢复和事件观察复用 Pi Durable 1.1.0。
+## 状态与数据所有权
 
-## 执行闭环
+| 状态           | 所有者           | 意义                                              |
+| -------------- | ---------------- | ------------------------------------------------- |
+| 业务任务       | Go 平台          | 待安排、进行中、需处理、完成；独立业务 ID         |
+| 执行任务与会话 | Pi Durable       | 规划、待确认、运行、停止、阻塞、执行结束          |
+| 验证           | 独立验证器与平台 | pass / fail / inconclusive / manual；自检另外保留 |
+| 资源健康       | 独立采集器与平台 | 健康、失败、未知、样本过期                        |
+| 领域数据       | 业务插件         | 笔记、资金、资产、机器、知识、人际关系等          |
 
-每张卡片关联一个原生 conversation；多个任务可在同一个 Harness 中存在。首版沿用原生调度，不添加全局时长预算或额外并发限额。
+Go 独立数据库通过带版本的事务快照保存注册清单、资源、业务任务、事件、故障、动作范围、验证证据与工作者状态。Pi 的对话、执行、工具历史、恢复和压缩仍由原生 Pi Durable 管理；Go 不复制原生调度器。旧任务自动导入独立业务 ID，并保留 conversation 映射与历史自检，避免升级时把旧自检升级为独立验收。
 
-规划时只提供 `propose_plan`，且工具 hook 阻止未确认的业务操作。计划包含执行步骤、完成标准与验证命令，用户可以修改后确认。确认后提供原生 read/write/edit/bash 和 refbox 的实验、验证与阻塞工具。
+## 运行与恢复
 
-`onYield` 在目标仍运行时驱动下一轮，实验经验放在持久文档中，并向 agent 呈现最近记录。`verify_result` 实际执行固定的已批准命令，保存退出码和输出；只有退出码 0 才将任务标记完成。测试命令必须由用户确认确实覆盖目标，尤其是模型优化不能仅凭训练指标判断。
+普通目标仍经计划确认后使用本地工具自主执行，onYield 在目标未通过执行自检时继续；实验与真实工具 entry 分别保存。根权限执行器保留已授权操作范围。故障诊断则使用单独持久会话，只提供目标资源观察及声明的只读插件工具，没有 CodingTools 或基础设施修改工具。
 
-实验结论标为 agent 的声明，与真实工具结果的 entry ID 分开保存。文件产物预览仅接受实验登记的路径，最多 1 MiB。停止调用原生 abort，保留上下文与产物；继续是新提交，不能让被终止的进程原地复活。
+监控每 15 秒采集固定业务断言，连续两次失败创建事件。平台可在 Pi 离线时调用独立 broker 重启已注册、预授权的具名服务。每个事件最多两次动作；不同请求不能绕过这个持久上限。broker 在执行前提交动作回执，同一动作 ID 不会重复重启，崩溃产生的模糊回执需要人工检查。平台升级或控制层重启默认由人决定。
 
-首版受限于所配置的验证命令，并不能保证 agent 不会改坏测试或数据。Agent 有完整本地管理权限，工作规则要求标准改变重新确认、refbox 自身升级由人决定。root 权限服务不是系统权限限制的替代品。
+观察 → 诊断 → 行动 → 验证 → 关闭，失败则回到诊断或等待用户。独立诊断是解释与建议来源，健康检查和已授权恢复不依赖故障中的 Pi。健康采样连续性在长间隔后重置，禁用或撤销资源不能采样、重启或沿用旧验证结果。
 
-## 公开接口
+## Prove It Worker
 
-- `POST /api/login`、`POST /api/logout`、`GET /api/session`：单用户登录。
-- `GET /api/models`、`GET /api/health`：模型与执行服务状态。
-- `GET /api/tasks`、`POST /api/tasks`、`GET /api/tasks/{id}`：任务创建与状态。
-- `POST /api/tasks/{id}/{plan|approve|stop|continue|steer|report}`：控制操作。
-- `GET /api/tasks/{id}/view`、`GET /api/events?task={id}`：原生快照与 SSE。
-- `GET /api/tasks/{id}/artifact?path=...`：登记产物的文本预览。
-- `GET /api/services`、`POST /api/services`：业务目录创建和更新。
+固定注册标准来自 manifest，调用者不能替换成更宽松的测试。验证器重新读取注册范围，执行新鲜 HTTP 内容、JSON、指标或浏览器断言，通过独立 Pi 会话复核覆盖、矛盾及证据不足。没有执行工具，不修改基础设施。服务恢复需三次新鲜健康采样，全部固定断言通过，模型明确同意，且资源、事件、动作、版本、环境与时间相符。用户入口要实际呈现已登录的工作台。
 
-写请求携带 `X-Refbox-Request: 1` 与 `Idempotency-Key`。任务与控制命令将请求标识持久化，同键不同内容返回 409；原生提交复用 requestId。控制命令保留执行意图，重启后重新接入已提交工作，不重复改变已完成的结果。
+证据不足、模型不可用、浏览器缺失、过期或范围改变时保留 inconclusive；人工验收记录 manual。普通长期任务的历史 verify_result 只是 execution_assertion，不冒充独立证明。领域任务未来由对应插件提供独立标准和验收适配器；当前自动验收覆盖监控事件。
 
-控制台登录使用 PBKDF2-SHA256 密码 hash、HttpOnly / SameSite 会话 cookie，写请求验证来源。Go 到 Node 采用独立内部 token，Node 只监听回环地址。默认仅本机访问；私人网络部署可配置监听地址与 HTTPS 代理。
+## 插件与接口
 
-## 恢复与日报
+独立服务通过版本化 manifest 声明工作区、资源、工具 HTTP 方法、事件和验收要求。后端只允许注册的本机 HTTP 服务；凭据通过指定环境变量读取，不进入浏览器。平台发现能力并通过清单选择工具目标，模型不选择任意请求目的地址。
 
-进程启动重新打开 SQLite，安装相同扩展后调用原生 resume。工具中断遵循原生 replay 策略；未声明安全的工具不会被 refbox 盲目重放。无法继续的执行呈现为阻塞，等待用户指引。
+首版支持可信插件。隔离工作区使用服务端 HTML，与平台声明工具表单配合；复杂交互客户端后续引入受控消息桥。插件业务事件接入平台索引，SSE 重连为尽力传递；可靠业务状态依然以插件数据库为准。随手记插件具有自己的表与幂等命令，平台核心不新增笔记业务表。
 
-每天北京时间 09:00，Go 根据创建时间与已保存的日期触发缺失日报。每个任务每天一份，内容是生成时的事实快照；重启补生成的历史日期报告明确标注生成时间，不假装重建过去的实时状态。报告不另行调用模型，不中断正在运行的 agent。
+API 细节见 [契约](v2/contract.md)。旧 /api/tasks 与原生事件接口继续兼容；新 UI 使用 /api/platform/snapshot、/events 与独立业务任务 ID。/health 独立于执行器。所有写操作继续通过单用户会话、来源验证和请求回执，服务间使用独立 Bearer 凭据。
 
-## 后续扩展
+## 部署边界
 
-Go 的执行服务契约与看板不依赖具体业务；以后可以接入远程执行服务或其他 agent 的适配器。首版 loopback 限制是有意的，远程接入需要另做传输认证。业务通过目录说明和 agent 工具接入，不把业务数据库搬进 refbox。
+执行器与 broker 为 root，Go 控制层、采集器、验证器与业务插件为普通用户。每个进程由 launchd 独立守护，数据留在内部盘的不同 SQLite 文件。Cloudflare Tunnel 保持既有用户入口与专用配置，代理和 Tailscale 不属于此次变更。
 
-常驻周期职责、完整服务管理界面、其他 provider、跨机器部署与自动更新均未实现。
-
-## Cloudflare Tunnel 部署
-
-独立命名 Tunnel 将 HTTPS 域名转发到 Go 的回环 HTTP 服务，connector 由 `ai.refbox.tunnel` 保持运行。执行器接口仍为仅本机、独立认证的接口，不直接发布到 Tunnel。refbox 的单用户密码、Secure / HttpOnly Cookie 与写请求保护适用于公开域名。
-
-不依赖 Tailscale MagicDNS 或客户端 VPN。部署验证应包括域名的浏览器登录、SSE 状态快照、产物预览与 Cookie 属性；仅 connector 健康不代表网站可用。
+同机 root 能修改平台和证据，因此这里的独立性是运行角色、会话、工具和记录分离，并非恶意 root 下的防篡改证明。扩展更多 Agent 时先检查资源互斥、验证覆盖、误报与人工处理成本；不同角色可注册多个工作者，当前默认执行和验证路由为本机实例。

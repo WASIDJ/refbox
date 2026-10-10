@@ -26,17 +26,27 @@ import (
 )
 
 type Config struct {
-	EngineURL, EngineToken, PasswordHash, WebDir string
-	SecureCookie                                 bool
+	EngineURL, EngineToken, PasswordHash, WebDir                                        string
+	SecureCookie                                                                        bool
+	PlatformDatabase, PlatformToken, BrokerURL, BrokerToken, VerifierURL, VerifierToken string
+	AutoRepair                                                                          bool
+	BuiltinPlugins                                                                      []PluginRegistration
+}
+type PluginRegistration struct {
+	ManifestURL   string `json:"manifestUrl"`
+	CredentialEnv string `json:"credentialEnv"`
 }
 type Server struct {
-	config   Config
-	mux      *http.ServeMux
-	secret   []byte
-	proxy    *httputil.ReverseProxy
-	client   *http.Client
-	mu       sync.Mutex
-	failures map[string][]time.Time
+	config         Config
+	mux            *http.ServeMux
+	secret         []byte
+	proxy          *httputil.ReverseProxy
+	client         *http.Client
+	serviceClient  *http.Client
+	manifestClient *http.Client
+	mu             sync.Mutex
+	failures       map[string][]time.Time
+	platform       *Platform
 }
 
 func New(cfg Config) (*Server, error) {
@@ -47,6 +57,16 @@ func New(cfg Config) (*Server, error) {
 	if len(cfg.EngineToken) < 32 {
 		return nil, errors.New("internal token must have at least 32 characters")
 	}
+	seen := map[string]bool{}
+	for _, token := range []string{cfg.EngineToken, cfg.PlatformToken, cfg.BrokerToken, cfg.VerifierToken} {
+		if token == "" {
+			continue
+		}
+		if len(token) < 32 || seen[token] {
+			return nil, errors.New("each service credential must be distinct and at least32 characters")
+		}
+		seen[token] = true
+	}
 	if _, _, _, err = decodeHash(cfg.PasswordHash); err != nil {
 		return nil, err
 	}
@@ -54,6 +74,12 @@ func New(cfg Config) (*Server, error) {
 	if _, err = rand.Read(s.secret); err != nil {
 		return nil, err
 	}
+	s.platform, err = OpenPlatform(cfg.PlatformDatabase)
+	if err != nil {
+		return nil, err
+	}
+	s.serviceClient = &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	s.manifestClient = &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
 	s.proxy = httputil.NewSingleHostReverseProxy(u)
 	original := s.proxy.Director
 	s.proxy.Director = func(r *http.Request) {
@@ -78,6 +104,10 @@ func New(cfg Config) (*Server, error) {
 	s.mux.HandleFunc("GET /api/session", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]bool{"authenticated": s.authenticated(r)})
 	})
+	s.mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]any{"ok": true, "service": "refbox-control", "version": "2"})
+	})
+	s.mux.HandleFunc("/internal/", s.internalAPI)
 	s.mux.HandleFunc("/api/", s.api)
 	s.mux.HandleFunc("/", s.ui)
 	return s, nil
@@ -206,8 +236,14 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 128000)
 	}
+	if strings.HasPrefix(r.URL.Path, "/api/platform/") {
+		s.platformAPI(w, r)
+		return
+	}
 	s.proxy.ServeHTTP(w, r)
 }
+
+func (s *Server) Close() error { return s.platform.Close() }
 func (s *Server) ui(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" && r.Method != "HEAD" {
 		w.WriteHeader(405)

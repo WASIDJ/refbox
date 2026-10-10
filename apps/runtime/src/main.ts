@@ -36,6 +36,13 @@ try {
   engine = await new Engine(
     await engyModels(),
     process.env.REFBOX_MODEL ?? "kimi-k3",
+    "engy",
+    process.env.REFBOX_PLATFORM_URL && process.env.REFBOX_PLATFORM_TOKEN
+      ? {
+          url: process.env.REFBOX_PLATFORM_URL,
+          token: process.env.REFBOX_PLATFORM_TOKEN,
+        }
+      : undefined,
   ).open(await openNodeSqliteStorage(database));
   const server = runtimeServer(engine, process.env.REFBOX_ENGINE_TOKEN ?? "");
   const port = Number(process.env.REFBOX_ENGINE_PORT ?? 18801);

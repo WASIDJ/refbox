@@ -48,11 +48,33 @@ const definitions = [
     user: owner,
     args: [node, resolve(serviceRoot, "scripts/start-control.mjs")],
   },
+  {
+    name: "ai.refbox.broker",
+    user: "root",
+    args: [node, resolve(serviceRoot, "scripts/start-broker.mjs")],
+  },
+  ...[
+    ["monitor", "monitor"],
+    ["verifier", "prover"],
+    ["scratchpad", "scratchpad"],
+  ].map(([label, file]) => ({
+    name: "ai.refbox." + label,
+    user: owner,
+    args: [
+      node,
+      "--env-file=" + resolve(serviceRoot, ".env"),
+      resolve(serviceRoot, "apps/services/" + file + ".mjs"),
+    ],
+  })),
 ];
 if (install) {
   for (const file of [
     ".env",
     "bin/refbox",
+    "bin/refbox-broker",
+    "apps/services/monitor.mjs",
+    "apps/services/prover.mjs",
+    "apps/services/scratchpad.mjs",
     "apps/runtime/dist/main.js",
     "apps/web/dist/index.html",
     "var/daemon-node/bin/node",
@@ -156,14 +178,31 @@ if (install) {
   }
   mkdirSync(resolve(data, "workspaces"), { recursive: true, mode: 0o755 });
   let env = readFileSync(resolve(root, ".env"), "utf8");
+  // Preserve production credentials and preferences. Add only missing platform keys.
+  if (existsSync(resolve(serviceRoot, ".env"))) {
+    let existing = readFileSync(resolve(serviceRoot, ".env"), "utf8");
+    for (const line of env.split(/\r?\n/)) {
+      const name = /^([A-Z][A-Z0-9_]*)=/.exec(line)?.[1];
+      if (name && !new RegExp("^" + name + "=", "m").test(existing))
+        existing += "\n" + line;
+    }
+    env = existing;
+  }
   for (const [key, value] of Object.entries({
     REFBOX_DATABASE: database,
     REFBOX_WEB_DIR: resolve(serviceRoot, "apps/web/dist"),
+    REFBOX_PLATFORM_DATABASE: resolve(data, "platform.sqlite"),
+    REFBOX_MONITOR_DATABASE: resolve(data, "monitor.sqlite"),
+    REFBOX_VERIFIER_DATABASE: resolve(data, "verifier.sqlite"),
+    REFBOX_SCRATCHPAD_DATABASE: resolve(data, "scratchpad.sqlite"),
+    REFBOX_BROKER_DATABASE: resolve(data, "broker.sqlite"),
   }))
-    env = env.replace(
-      new RegExp("^" + key + "=.*$", "m"),
-      key + "='" + value + "'",
-    );
+    env = new RegExp("^" + key + "=", "m").test(env)
+      ? env.replace(
+          new RegExp("^" + key + "=.*$", "m"),
+          key + "='" + value + "'",
+        )
+      : env + "\n" + key + "='" + value + "'";
   writeFileSync(resolve(serviceRoot, ".env"), env, { mode: 0o600 });
   execFileSync("/usr/sbin/chown", [
     owner + ":staff",

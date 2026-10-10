@@ -9,3 +9,6 @@ bin/
 .DS_Store
 apps/web/test-results/
 apps/web/playwright-report/
+
+# Also ignore a development dependency symlink.
+node_modules

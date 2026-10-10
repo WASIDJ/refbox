@@ -1,1013 +1,1243 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useDeferredValue, useEffect, useState, type FormEvent } from "react";
+import { api, relativeTime, timestamp } from "./api";
+import { Badge, Empty, Icon, Modal, StatusTriple } from "./components";
+import TaskDetail from "./TaskDetail";
+import {
+  emptySnapshot,
+  type Evidence,
+  type Plugin,
+  type Snapshot,
+  type Task,
+  type Tool,
+} from "./types";
 
-type Plan = { steps: string; criteria: string; verificationCommand: string };
-type Task = {
-  id: string;
-  title: string;
-  goal: string;
-  cwd: string;
-  model: string;
-  status: string;
-  createdAt: string;
-  updatedAt: string;
-  plan: Plan | null;
-  approvedPlan: Plan | null;
-  reason: string;
-  verified: boolean;
-  experiments: {
-    id: string;
-    at: string;
-    hypothesis: string;
-    conclusion: string;
-    artifacts: string[];
-    evidenceEntries: string[];
-  }[];
-  verifications: {
-    at: string;
-    command: string;
-    exitCode: number;
-    output: string;
-    summary: string;
-  }[];
-  reports: { date: string; at: string; markdown: string }[];
+const sections = {
+  home: "Homelab",
+  tasks: "长期任务",
+  plugins: "插件管理",
+  workspace: "业务工作区",
 };
-type Service = {
-  id: string;
-  name: string;
-  url: string;
-  description: string;
-  operations: string;
-};
-type View = {
-  entries: {
-    id: string;
-    kind: string;
-    model?: {
-      role: string;
-      content:
-        | string
-        | { type: string; text?: string; name?: string; arguments?: unknown }[];
-    }[];
-  }[];
-  docs: Record<string, unknown>;
-};
-const labels: Record<string, string> = {
-  draft: "待规划",
-  planning: "规划中",
-  awaiting_confirmation: "待确认",
-  running: "运行中",
-  stopping: "停止中",
-  stopped: "已停止",
-  blocked: "有阻塞",
-  completed: "已完成",
-};
-const columns = [
-  {
-    name: "待安排",
-    subtitle: "明确目标，确认计划",
-    states: ["draft", "planning", "awaiting_confirmation"],
-  },
-  {
-    name: "进行中",
-    subtitle: "持续实验与验证",
-    states: ["running", "stopping"],
-  },
-  {
-    name: "待处理",
-    subtitle: "需要指引或继续",
-    states: ["blocked", "stopped"],
-  },
-  { name: "已完成", subtitle: "保存经过验证的成果", states: ["completed"] },
+const businessColumns = [
+  ["backlog", "待安排"],
+  ["active", "进行中"],
+  ["attention", "需要处理"],
+  ["done", "已完成"],
 ];
-const time = (s: string) =>
-  new Date(s).toLocaleString("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
 
-async function api<T>(path: string, payload?: unknown): Promise<T> {
-  const res = await fetch("/api" + path, {
-    method: payload === undefined ? "GET" : "POST",
-    headers:
-      payload === undefined
-        ? {}
-        : {
-            "Content-Type": "application/json",
-            "X-Refbox-Request": "1",
-            "Idempotency-Key": crypto.randomUUID(),
-          },
-    ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error ?? "请求失败");
-  return data;
-}
-function Brand() {
+function EvidenceCard({ evidence }: { evidence: Evidence }) {
   return (
-    <span className="brand">
-      <span className="brand-mark">
-        <i />
-        <i />
-        <i />
-      </span>
-      refbox<span className="brand-dot">.</span>
-    </span>
+    <article className="evidence-card">
+      <div className="section-heading">
+        <Badge state={evidence.verdict} />
+        <span className="muted">{timestamp(evidence.at)}</span>
+      </div>
+      <p>{evidence.summary}</p>
+      <details>
+        <summary>查看检查与溯源</summary>
+        <dl className="key-values">
+          <div>
+            <dt>资源</dt>
+            <dd>{evidence.resourceId}</dd>
+          </div>
+          <div>
+            <dt>动作</dt>
+            <dd>{evidence.actionId || "未执行修复"}</dd>
+          </div>
+          <div>
+            <dt>版本 / 环境</dt>
+            <dd>
+              {evidence.version} / {evidence.environmentId}
+            </dd>
+          </div>
+          <div>
+            <dt>独立审查会话</dt>
+            <dd>{evidence.reviewConversationId || "尚无模型审查"}</dd>
+          </div>
+        </dl>
+        {(evidence.checks ?? []).map((check) => (
+          <div className="proof-check" key={check.id}>
+            <div>
+              <strong>{check.id}</strong>
+              <Badge
+                state={check.passed ? "pass" : "fail"}
+                text={check.passed ? "检查通过" : "检查未通过"}
+              />
+            </div>
+            <p>{check.detail}</p>
+            <p className="muted break-word">
+              {check.url} · {timestamp(check.sampledAt)}
+            </p>
+          </div>
+        ))}
+        {evidence.review && <pre>{evidence.review}</pre>}
+      </details>
+    </article>
   );
 }
-function Tag({ state }: { state: string }) {
+
+function PluginTools({
+  plugin,
+  onResult,
+  perform,
+  pending,
+}: {
+  plugin: Plugin;
+  onResult: () => void;
+  perform: (
+    operation: () => Promise<unknown>,
+    success?: string,
+  ) => Promise<boolean>;
+  pending: boolean;
+}) {
+  const [selected, setSelected] = useState(plugin.manifest.tools[0]?.id ?? ""),
+    [input, setInput] = useState("{}"),
+    [output, setOutput] = useState("");
+  const tools = plugin.manifest.tools ?? [],
+    tool = tools.find((candidate) => candidate.id === selected);
+  async function invoke(event: FormEvent) {
+    event.preventDefault();
+    const success = await perform(async () => {
+      let body: unknown;
+      try {
+        body = JSON.parse(input);
+      } catch {
+        throw new Error("工具参数必须是有效的 JSON");
+      }
+      if (!body || typeof body !== "object" || Array.isArray(body))
+        throw new Error("工具参数必须是 JSON 对象");
+      const result = await api<unknown>(
+        `/platform/plugins/${encodeURIComponent(plugin.id)}/tools/${encodeURIComponent(selected)}`,
+        body,
+      );
+      setOutput(JSON.stringify(result, null, 2));
+    }, "工具已执行，工作区内容已刷新");
+    if (success) onResult();
+  }
+  if (!tools.length) return null;
   return (
-    <span className={"tag " + state}>
-      <i />
-      {labels[state] ?? state}
-    </span>
+    <details className="plugin-tools">
+      <summary>
+        插件工具 <span className="muted">{tools.length} 项能力</span>
+      </summary>
+      <form onSubmit={invoke}>
+        <label>
+          选择工具
+          <select
+            value={selected}
+            onChange={(event) => setSelected(event.target.value)}
+          >
+            {tools.map((item: Tool) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        {tool && (
+          <p>
+            {tool.description}
+            {tool.mutates && (
+              <span className="muted"> · 将修改插件业务数据</span>
+            )}
+          </p>
+        )}
+        <label>
+          工具参数（JSON）
+          <textarea
+            className="code"
+            value={input}
+            onChange={(event) => setInput(event.target.value)}
+            required
+          />
+        </label>
+        <button
+          className="primary"
+          disabled={pending || !plugin.enabled || !plugin.online || !tool}
+        >
+          执行工具
+        </button>
+      </form>
+      {output && <pre aria-label="工具结果">{output}</pre>}
+    </details>
   );
 }
 
 export default function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null),
     [password, setPassword] = useState("");
-  const [tasks, setTasks] = useState<Task[]>([]),
-    [services, setServices] = useState<Service[]>([]),
-    [models, setModels] = useState<{ id: string; name: string }[]>([]);
-  const [selected, setSelected] = useState(""),
-    [view, setView] = useState<View | null>(null),
-    [tab, setTab] = useState("tasks"),
-    [detailTab, setDetailTab] = useState("overview");
-  const [connected, setConnected] = useState(false),
-    [error, setError] = useState(""),
+  const [snapshot, setSnapshot] = useState<Snapshot>(emptySnapshot),
+    [connected, setConnected] = useState(false),
+    [loaded, setLoaded] = useState(false);
+  const [tab, setTab] = useState<keyof typeof sections>("home"),
+    [workspaceId, setWorkspaceId] = useState(""),
+    [frameVersion, setFrameVersion] = useState(0);
+  const [error, setError] = useState(""),
+    [message, setMessage] = useState(""),
     [pending, setPending] = useState(false);
-  const [modal, setModal] = useState(""),
-    [editingService, setEditingService] = useState<Service | null>(null),
-    [artifact, setArtifact] = useState<{ path: string; text: string } | null>(
-      null,
-    );
-  const [draft, setDraft] = useState<Plan>({
-      steps: "",
-      criteria: "",
-      verificationCommand: "",
-    }),
-    [guidance, setGuidance] = useState("");
-  const task = tasks.find((t) => t.id === selected);
+  const [modal, setModal] = useState<"" | "task" | "plugin">(""),
+    [selectedTask, setSelectedTask] = useState(""),
+    [selectedIncident, setSelectedIncident] = useState("");
+  const [models, setModels] = useState<{ id: string; name: string }[]>([]),
+    [search, setSearch] = useState("");
+  const [newTask, setNewTask] = useState({
+    title: "",
+    goal: "",
+    cwd: "",
+    model: "kimi-k3",
+  });
+  const [manifestUrl, setManifestUrl] = useState(""),
+    [credentialEnv, setCredentialEnv] = useState("");
+  const query = useDeferredValue(search).toLowerCase();
+  const task = snapshot.tasks.find((item) => item.id === selectedTask),
+    incident = snapshot.incidents.find((item) => item.id === selectedIncident),
+    plugin = snapshot.plugins.find((item) => item.id === workspaceId);
+  const incidentResource = snapshot.resources.find(
+    (resource) => resource.id === incident?.resourceId,
+  );
+  const openIncidents = snapshot.incidents.filter(
+    (item) => item.status !== "closed",
+  );
+  const tasks = snapshot.tasks.filter((item) =>
+    `${item.title} ${item.goal}`.toLowerCase().includes(query),
+  );
+  async function refresh() {
+    const data = await api<Snapshot>("/platform/snapshot");
+    setSnapshot(data);
+    setLoaded(true);
+  }
   useEffect(() => {
+    const expired = () => {
+      setAuthenticated(false);
+      setSelectedTask("");
+      setSelectedIncident("");
+      setModal("");
+    };
+    window.addEventListener("refbox:unauthorized", expired);
     api<{ authenticated: boolean }>("/session")
-      .then((x) => setAuthenticated(x.authenticated))
+      .then((session) => setAuthenticated(session.authenticated))
       .catch(() => setAuthenticated(false));
+    return () => window.removeEventListener("refbox:unauthorized", expired);
   }, []);
   useEffect(() => {
     if (!authenticated) return;
-    api<typeof models>("/models")
-      .then(setModels)
-      .catch((e) => setError(e.message));
-  }, [authenticated]);
-  useEffect(() => {
-    if (!authenticated) return;
-    setConnected(false);
-    setView(null);
-    const stream = new EventSource(
-      "/api/events" + (selected ? "?task=" + encodeURIComponent(selected) : ""),
-    );
+    let active = true;
+    void refresh().catch((cause) => {
+      if (active) setError((cause as Error).message);
+    });
+    void api<typeof models>("/models")
+      .then((data) => {
+        if (active) setModels(data);
+      })
+      .catch(() => {});
+    const stream = new EventSource("/api/platform/events");
     stream.addEventListener("snapshot", (event) => {
-      const state = JSON.parse((event as MessageEvent).data);
-      setTasks(state.tasks);
-      setServices(state.services);
-      setView(state.view);
-      setConnected(true);
+      try {
+        const data = JSON.parse((event as MessageEvent).data) as Snapshot;
+        if (active) {
+          setSnapshot(data);
+          setConnected(true);
+          setLoaded(true);
+        }
+      } catch {
+        if (active) setError("实时状态无法读取，正在重新同步");
+      }
     });
     stream.onerror = () => {
-      setConnected(false);
-      void api<{ authenticated: boolean }>("/session")
-        .then((x) => {
-          if (!x.authenticated) setAuthenticated(false);
-        })
-        .catch(() => {});
+      if (active) setConnected(false);
     };
-    return () => stream.close();
-  }, [authenticated, selected]);
-  const displayedPlan =
-    task?.status === "awaiting_confirmation" || task?.status === "planning"
-      ? task?.plan
-      : (task?.approvedPlan ?? task?.plan);
-  const planKey = displayedPlan ? JSON.stringify(displayedPlan) : "";
-  useEffect(() => {
-    setDraft(
-      displayedPlan ?? { steps: "", criteria: "", verificationCommand: "" },
+    const timer = setInterval(
+      () => void refresh().catch(() => setConnected(false)),
+      15000,
     );
-  }, [selected, planKey]);
-  async function perform(fn: () => Promise<unknown>) {
+    return () => {
+      active = false;
+      stream.close();
+      clearInterval(timer);
+      setConnected(false);
+    };
+  }, [authenticated]);
+  useEffect(() => {
+    if (!message) return;
+    const timer = setTimeout(() => setMessage(""), 6000);
+    return () => clearTimeout(timer);
+  }, [message]);
+  async function perform(
+    operation: () => Promise<unknown>,
+    success?: string,
+    refreshAfter = true,
+  ) {
     setPending(true);
     setError("");
+    setMessage("");
     try {
-      await fn();
+      await operation();
+      if (authenticated && refreshAfter) await refresh();
+      if (success) setMessage(success);
       return true;
-    } catch (e) {
-      setError((e as Error).message);
+    } catch (cause) {
+      setError((cause as Error).message);
       return false;
     } finally {
       setPending(false);
     }
   }
-  async function action(name: string, payload: unknown = {}) {
-    if (!task) return false;
-    return perform(() => api("/tasks/" + task.id + "/" + name, payload));
+  async function login(event: FormEvent) {
+    event.preventDefault();
+    await perform(
+      async () => {
+        await api("/login", { password });
+        setPassword("");
+        setAuthenticated(true);
+      },
+      undefined,
+      false,
+    );
   }
-  async function login(e: FormEvent) {
-    e.preventDefault();
-    await perform(async () => {
-      await api("/login", { password });
-      setAuthenticated(true);
-      setPassword("");
-    });
+  async function logout() {
+    await perform(
+      async () => {
+        await api("/logout", {});
+        setAuthenticated(false);
+        setSnapshot(emptySnapshot);
+        setSelectedTask("");
+        setSelectedIncident("");
+      },
+      undefined,
+      false,
+    );
   }
-  async function createTask(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    const form = new FormData(e.currentTarget);
-    await perform(async () => {
-      const t = await api<Task>("/tasks", Object.fromEntries(form));
-      setTasks((prev) => [...prev.filter((x) => x.id !== t.id), t]);
-      setSelected(t.id);
+  async function createTask(event: FormEvent) {
+    event.preventDefault();
+    const success = await perform(async () => {
+      const result = await api<Task>("/platform/tasks", newTask);
+      setSelectedTask(result.id);
       setModal("");
-      setDetailTab("overview");
-    });
+      setTab("tasks");
+    }, "任务已创建，可以让 Agent 制定计划");
+    if (success) setNewTask({ title: "", goal: "", cwd: "", model: "kimi-k3" });
   }
-  async function saveService(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    const form = new FormData(e.currentTarget);
-    await perform(async () => {
-      await api("/services", {
-        ...Object.fromEntries(form),
-        ...(editingService ? { id: editingService.id } : {}),
+  async function registerPlugin(event: FormEvent) {
+    event.preventDefault();
+    const success = await perform(async () => {
+      await api("/platform/plugins", {
+        manifestUrl,
+        ...(credentialEnv ? { credentialEnv } : {}),
       });
       setModal("");
-      setEditingService(null);
-    });
+    }, "插件已注册，能力清单已载入");
+    if (success) {
+      setManifestUrl("");
+      setCredentialEnv("");
+    }
   }
-  async function showArtifact(path: string) {
-    await perform(async () => {
-      const res = await fetch(
-        "/api/tasks/" + task!.id + "/artifact?path=" + encodeURIComponent(path),
-      );
-      if (!res.ok) throw new Error("产物无法读取");
-      setArtifact({ path, text: await res.text() });
-    });
-  }
-
+  const changeTab = (next: keyof typeof sections) => {
+    setTab(next);
+    setError("");
+    setMessage("");
+  };
   if (authenticated === null)
     return (
-      <main className="loading">
-        <Brand />
-        <p>正在连接你的 Agent 工作空间…</p>
+      <main className="login-page">
+        <div className="login-box">
+          <span className="brand">
+            refbox<span>.</span>
+          </span>
+          <p role="status">正在连接工作台…</p>
+        </div>
       </main>
     );
   if (!authenticated)
     return (
-      <main className="login">
-        <section className="login-intro">
-          <Brand />
-          <span className="eyebrow">YOUR AGENTS, AT HOME</span>
-          <h1>
-            让想法持续推进。
-            <br />
-            <em>让成果留下证据。</em>
-          </h1>
-          <p>
-            你的 Homelab 控制层。安排目标，让 Agent
-            继续工作，明天回来查看它完成了什么。
-          </p>
-          <div className="login-foot">
-            <span>Pi Durable</span>
-            <span>自指引擎 · v0.1</span>
-          </div>
+      <main className="login-page">
+        <section className="login-box">
+          <span className="brand">
+            refbox<span>.</span>
+          </span>
+          <p className="eyebrow">个人 HOMELAB</p>
+          <h1>进入你的工作台</h1>
+          <p className="muted">运行 Agent，连接服务，查看可以验证的成果。</p>
+          <form onSubmit={login} data-testid="login-form">
+            <label>
+              管理员密码
+              <input
+                autoFocus
+                autoComplete="current-password"
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                required
+              />
+            </label>
+            {error && (
+              <p className="notice error" role="alert">
+                {error}
+              </p>
+            )}
+            <button className="primary" disabled={pending}>
+              {pending ? "正在登录…" : "进入 refbox"}
+            </button>
+          </form>
         </section>
-        <form className="login-form" onSubmit={login}>
-          <span className="eyebrow">WELCOME HOME</span>
-          <h2>进入工作空间</h2>
-          <p>使用你的管理员密码登录。</p>
-          <label>
-            管理员密码
-            <input
-              autoFocus
-              autoComplete="current-password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-            />
-          </label>
-          {error && (
-            <p className="error" role="alert">
-              {error}
-            </p>
-          )}
-          <button className="primary" disabled={pending}>
-            {pending ? "正在登录…" : "进入 refbox →"}
-          </button>
-          <small>个人工作空间 · 家庭网络与私人 VPN</small>
-        </form>
       </main>
     );
-
   return (
-    <div className="app">
+    <div className="platform-shell" data-testid="platform-shell">
+      <a className="skip-link" href="#main">
+        跳到主要内容
+      </a>
       <aside className="sidebar">
-        <Brand />
-        <div className="space-label">PERSONAL HOMELAB</div>
-        <nav>
-          <button
-            className={tab === "tasks" ? "active" : ""}
-            onClick={() => setTab("tasks")}
-          >
-            <span>▦</span>任务看板 <b>{tasks.length}</b>
-          </button>
-          <button
-            className={tab === "services" ? "active" : ""}
-            onClick={() => setTab("services")}
-          >
-            <span>◈</span>服务入口 <b>{services.length}</b>
-          </button>
-          <button
-            className={tab === "about" ? "active" : ""}
-            onClick={() => setTab("about")}
-          >
-            <span>◎</span>工作方式
-          </button>
+        <div className="sidebar-brand">
+          <span className="brand">
+            refbox<span>.</span>
+          </span>
+          <span className="muted">自指引擎</span>
+        </div>
+        <nav aria-label="主要导航">
+          {(
+            [
+              ["home", "home"],
+              ["tasks", "tasks"],
+              ["plugins", "plugins"],
+            ] as const
+          ).map(([id, icon]) => (
+            <button
+              key={id}
+              aria-current={tab === id ? "page" : undefined}
+              onClick={() => changeTab(id)}
+            >
+              <Icon name={icon} />
+              <span>{sections[id]}</span>
+              {id === "home" && openIncidents.length > 0 && (
+                <span className="nav-count">{openIncidents.length}</span>
+              )}
+            </button>
+          ))}
         </nav>
+        <div className="workspace-nav">
+          <p className="eyebrow">业务工作区</p>
+          {snapshot.plugins
+            .filter((item) => item.enabled)
+            .map((item) => (
+              <button
+                key={item.id}
+                aria-current={
+                  tab === "workspace" && workspaceId === item.id
+                    ? "page"
+                    : undefined
+                }
+                onClick={() => {
+                  setWorkspaceId(item.id);
+                  changeTab("workspace");
+                }}
+              >
+                <span
+                  className={`workspace-dot ${item.online ? "is-online" : ""}`}
+                />
+                <span>{item.workspace.title || item.name}</span>
+              </button>
+            ))}
+          {!snapshot.plugins.some((item) => item.enabled) && (
+            <p className="muted nav-empty">注册插件以添加业务工作区</p>
+          )}
+        </div>
         <div className="sidebar-bottom">
-          <div className="engine-state">
-            <i className={connected ? "online" : ""} />
-            <div>
-              <strong>{connected ? "工作空间已连接" : "正在重新连接"}</strong>
-              <small>Pi Durable · Engy</small>
-            </div>
-          </div>
-          <button
-            onClick={() =>
-              perform(async () => {
-                await api("/logout", {});
-                setAuthenticated(false);
-              })
-            }
-          >
-            退出登录 ↗
+          <span className={`connection ${connected ? "connected" : ""}`}>
+            <span className="status-dot" />
+            {connected ? "实时连接" : loaded ? "已同步，重连中" : "连接中"}
+          </span>
+          <button onClick={() => void logout()} disabled={pending}>
+            退出登录
           </button>
         </div>
       </aside>
-      <main className="workspace">
-        <header>
-          <div className="breadcrumb">
-            工作空间 <span>/</span>{" "}
-            {tab === "tasks"
-              ? "任务看板"
-              : tab === "services"
-                ? "服务入口"
-                : "工作方式"}
-          </div>
-          <div className="header-right">
-            <span className="avatar">R</span>
-            <span>个人 Homelab</span>
-            <button
-              className="mobile-logout"
-              onClick={() =>
-                perform(async () => {
-                  await api("/logout", {});
-                  setAuthenticated(false);
-                })
-              }
-            >
-              退出
-            </button>
-          </div>
+      <main id="main" className="main-content">
+        <header className="topbar" aria-busy={pending}>
+          <span>
+            个人 Homelab{" "}
+            <span className="muted">
+              /{" "}
+              {tab === "workspace"
+                ? (plugin?.workspace.title ?? "业务工作区")
+                : sections[tab]}
+            </span>
+          </span>
+          <button
+            className="refresh-button"
+            onClick={() => void perform(refresh, "状态已刷新")}
+            disabled={pending}
+          >
+            <Icon name="refresh" />
+            <span>刷新</span>
+          </button>
+          <button
+            className="mobile-logout"
+            onClick={() => void logout()}
+            disabled={pending}
+          >
+            退出
+          </button>
         </header>
         <div className="page-heading">
           <div>
-            <span className="eyebrow">
-              {tab === "tasks"
-                ? "CONTINUOUS WORK"
-                : tab === "services"
-                  ? "CONNECTED SERVICES"
-                  : "HOW REFBOX WORKS"}
-            </span>
             <h1>
-              {tab === "tasks"
-                ? "让目标持续向前。"
-                : tab === "services"
-                  ? "每个服务，各司其职。"
-                  : "一个有验证闭环的家。"}
+              {tab === "workspace"
+                ? (plugin?.workspace.title ?? "业务工作区")
+                : sections[tab]}
             </h1>
-            <p>
-              {tab === "tasks"
-                ? "安排、观察、指引。成果与经验会留在这里。"
-                : tab === "services"
-                  ? "业务保持独立，Agent 连接并操作它们。"
-                  : "明确目标，确认标准，再让 Agent 自主推进。"}
+            <p className="muted">
+              {tab === "home"
+                ? "关注服务状态、修复进展和验证证据。"
+                : tab === "tasks"
+                  ? "长期目标持续推进，执行记录和独立验证分别呈现。"
+                  : tab === "plugins"
+                    ? "每项业务保留自己的服务和数据，通过声明的能力接入工作台。"
+                    : plugin?.description}
             </p>
           </div>
-          {tab !== "about" && (
-            <button
-              className="primary"
-              onClick={() => {
-                setEditingService(null);
-                setModal(tab === "tasks" ? "task" : "service");
-              }}
-            >
-              ＋ {tab === "tasks" ? "新建目标" : "添加服务"}
+          {tab === "tasks" && (
+            <button className="primary" onClick={() => setModal("task")}>
+              <Icon name="plus" />
+              新建目标
+            </button>
+          )}
+          {tab === "plugins" && (
+            <button className="primary" onClick={() => setModal("plugin")}>
+              <Icon name="plus" />
+              注册插件
             </button>
           )}
         </div>
-        {error && (
-          <div className="error-banner" role="alert">
+        {pending && (
+          <p className="notice" role="status">
+            正在处理请求…
+          </p>
+        )}
+        {error && !selectedIncident && !modal && (
+          <div className="notice error" role="alert">
             {error}
-            <button aria-label="关闭错误" onClick={() => setError("")}>
-              ×
+            <button
+              className="icon-button"
+              aria-label="关闭错误"
+              onClick={() => setError("")}
+            >
+              <Icon name="close" />
             </button>
           </div>
         )}
-        {tab === "tasks" && (
+        {message && (
+          <p className="notice success" role="status">
+            {message}
+          </p>
+        )}
+        {!loaded && (
+          <p className="notice" role="status">
+            正在加载平台状态…
+          </p>
+        )}
+        {tab === "home" && (
           <>
-            <div className="stats">
+            <section className="overview-stats" aria-label="概览">
               <div>
-                <span>正在推进</span>
+                <span>需要处理</span>
                 <strong>
-                  {tasks.filter((t) => t.status === "running").length}
-                  <small>个目标</small>
+                  {openIncidents.length}
+                  <small>起事件</small>
                 </strong>
               </div>
               <div>
-                <span>需要你的决定</span>
+                <span>健康资源</span>
                 <strong>
                   {
-                    tasks.filter((t) =>
-                      ["blocked", "awaiting_confirmation"].includes(t.status),
+                    snapshot.resources.filter(
+                      (resource) => resource.health === "healthy",
                     ).length
                   }
-                  <small>项待处理</small>
+                  <small>/ {snapshot.resources.length}</small>
                 </strong>
               </div>
               <div>
-                <span>已验证的成果</span>
+                <span>持续运行</span>
                 <strong>
-                  {tasks.filter((t) => t.verified).length}
-                  <small>项已完成</small>
+                  {
+                    snapshot.tasks.filter(
+                      (item) => item.executionStatus === "running",
+                    ).length
+                  }
+                  <small>个任务</small>
                 </strong>
               </div>
-              <div className="stats-note">
-                <span className="sun">◌</span>
-                <div>
-                  <b>明天见，也随时见。</b>
-                  <p>每天 09:00 保存进展汇报</p>
-                </div>
+              <div>
+                <span>业务插件</span>
+                <strong>
+                  {snapshot.plugins.filter((item) => item.enabled).length}
+                  <small>已启用</small>
+                </strong>
               </div>
+            </section>
+            <section className="panel">
+              <div className="section-heading">
+                <div>
+                  <h2>机器与服务</h2>
+                  <p className="muted">
+                    样本超过 45 秒标记过期，健康不代表事件已通过验证。
+                  </p>
+                </div>
+                <span className="count">{snapshot.resources.length}</span>
+              </div>
+              {snapshot.resources.length ? (
+                <div className="resources">
+                  <div className="resource-table-head">
+                    <span>资源</span>
+                    <span>健康状态</span>
+                    <span>最近观测</span>
+                    <span>当前情况</span>
+                  </div>
+                  {snapshot.resources.map((resource) => (
+                    <article
+                      className="resource-row"
+                      key={resource.id}
+                      data-resource-id={resource.id}
+                    >
+                      <div className="resource-name">
+                        <h3>{resource.name}</h3>
+                        <span className="muted">
+                          {resource.kind} · {resource.environmentId}
+                        </span>
+                      </div>
+                      <div>
+                        <Badge state={resource.health} />
+                        <p className="muted">
+                          {resource.health === "healthy"
+                            ? `${resource.healthySamples} 个连续健康样本`
+                            : resource.failures
+                              ? `${resource.failures} 次连续失败`
+                              : "等待有效观测"}
+                        </p>
+                      </div>
+                      <div>
+                        <strong>{relativeTime(resource.sampledAt)}</strong>
+                        <p className="muted">
+                          {resource.method || "观测方法未报告"}
+                        </p>
+                        <time className="muted" dateTime={resource.sampledAt}>
+                          {timestamp(resource.sampledAt)}
+                        </time>
+                      </div>
+                      <div>
+                        <p className="resource-detail">
+                          {resource.detail || "尚无观测结果"}
+                        </p>
+                        {openIncidents
+                          .filter((item) => item.resourceId === resource.id)
+                          .map((item) => (
+                            <button
+                              className="text-button"
+                              key={item.id}
+                              onClick={() => setSelectedIncident(item.id)}
+                            >
+                              处理事件 <Icon name="arrow" />
+                            </button>
+                          ))}
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <Empty title="尚无受监控资源">
+                  注册监控插件后，资源与观测会显示在这里。
+                </Empty>
+              )}
+            </section>
+            <div className="home-grid">
+              <section className="panel">
+                <div className="section-heading">
+                  <h2>修复事件</h2>
+                  <span className="count">{openIncidents.length} 待处理</span>
+                </div>
+                {snapshot.incidents.length ? (
+                  <div className="incident-list">
+                    {[...snapshot.incidents]
+                      .sort(
+                        (a, b) =>
+                          Number(a.status === "closed") -
+                            Number(b.status === "closed") ||
+                          b.updatedAt.localeCompare(a.updatedAt),
+                      )
+                      .slice(0, 12)
+                      .map((item) => (
+                        <button
+                          className="incident-card"
+                          key={item.id}
+                          onClick={() => {
+                            setError("");
+                            setSelectedIncident(item.id);
+                          }}
+                        >
+                          <div className="section-heading">
+                            <strong>
+                              {snapshot.resources.find(
+                                (resource) => resource.id === item.resourceId,
+                              )?.name ?? item.resourceId}
+                            </strong>
+                            <Badge state={item.status} />
+                          </div>
+                          <p>{item.reason || "正在收集诊断信息"}</p>
+                          <div className="incident-meta">
+                            <span>重启 {item.attempts} / 2 次</span>
+                            <Badge state={item.verification} />
+                            <span>{timestamp(item.updatedAt)}</span>
+                          </div>
+                        </button>
+                      ))}
+                  </div>
+                ) : (
+                  <Empty title="暂无修复事件">
+                    连续两次观测失败后会创建事件。
+                  </Empty>
+                )}
+              </section>
+              <section className="panel">
+                <div className="section-heading">
+                  <h2>运行角色</h2>
+                </div>
+                <p className="muted">
+                  控制、监控、执行和验证分别保持自己的运行状态。
+                </p>
+                {snapshot.workers.length ? (
+                  <div className="worker-list">
+                    {snapshot.workers.map((worker) => (
+                      <article className="worker-row" key={worker.id}>
+                        <div>
+                          <h3>
+                            {{
+                              monitor: "监控采集",
+                              prover: "独立验证",
+                              executor: "Agent 执行",
+                              broker: "授权动作",
+                            }[worker.role] ?? worker.role}
+                          </h3>
+                          <p className="muted">{worker.detail || worker.id}</p>
+                          <span className="muted">
+                            {relativeTime(worker.lastSeen)}
+                          </span>
+                        </div>
+                        <Badge state={worker.status} />
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <Empty title="等待运行角色注册" />
+                )}
+              </section>
             </div>
-            <div className="board">
-              {columns.map((col, index) => (
-                <section className="column" key={col.name}>
-                  <div className="column-head">
-                    <span className={"column-dot dot-" + index} />
-                    <h2>{col.name}</h2>
-                    <b>
+            <section className="panel">
+              <div className="section-heading">
+                <h2>最近活动</h2>
+              </div>
+              {snapshot.events.length ? (
+                <ol className="activity-list">
+                  {[...snapshot.events]
+                    .sort((a, b) => b.at.localeCompare(a.at))
+                    .slice(0, 10)
+                    .map((event) => (
+                      <li key={event.id}>
+                        <time dateTime={event.at}>{timestamp(event.at)}</time>
+                        <span>{event.message}</span>
+                      </li>
+                    ))}
+                </ol>
+              ) : (
+                <p className="muted">尚无平台活动。</p>
+              )}
+            </section>
+          </>
+        )}
+        {tab === "tasks" && (
+          <>
+            <div className="task-toolbar">
+              <label className="search-label">
+                搜索任务
+                <input
+                  type="search"
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="名称或目标"
+                />
+              </label>
+              <span className="muted">{tasks.length} 个目标</span>
+            </div>
+            <div className="kanban">
+              {businessColumns.map(([state, name]) => (
+                <section className="kanban-column" key={state}>
+                  <div className="column-heading">
+                    <h2>{name}</h2>
+                    <span className="count">
                       {
-                        tasks.filter((t) => col.states.includes(t.status))
+                        tasks.filter((item) => item.businessStatus === state)
                           .length
                       }
-                    </b>
+                    </span>
                   </div>
-                  <p className="column-subtitle">{col.subtitle}</p>
                   {tasks
-                    .filter((t) => col.states.includes(t.status))
+                    .filter((item) => item.businessStatus === state)
                     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-                    .map((t) => (
+                    .map((item) => (
                       <button
                         className="task-card"
-                        key={t.id}
-                        onClick={() => {
-                          setSelected(t.id);
-                          setDetailTab("overview");
-                        }}
+                        key={item.id}
+                        onClick={() => setSelectedTask(item.id)}
                       >
-                        <Tag state={t.status} />
-                        <h3>{t.title}</h3>
-                        <p>{t.goal}</p>
+                        <h3>{item.title}</h3>
+                        <p>{item.goal}</p>
+                        <StatusTriple
+                          business={item.businessStatus}
+                          execution={item.executionStatus}
+                          proof={item.verificationStatus}
+                        />
+                        {!item.engineAvailable && (
+                          <span className="offline-note">执行服务离线</span>
+                        )}
                         <div className="card-meta">
-                          <span>{t.model}</span>
-                          <span>{t.experiments.length} 次实验</span>
+                          <span>{item.model}</span>
+                          <time dateTime={item.updatedAt}>
+                            {timestamp(item.updatedAt)}
+                          </time>
                         </div>
-                        <footer>
-                          <span className="mini-avatar">π</span>
-                          <span>{time(t.updatedAt)}</span>
-                          <span className="card-arrow">↗</span>
-                        </footer>
                       </button>
                     ))}
-                  {!tasks.some((t) => col.states.includes(t.status)) && (
-                    <div className="column-empty">
-                      <span>＋</span>
-                      {index === 0
-                        ? "从一个清晰的目标开始"
-                        : "等待目标进入这里"}
-                    </div>
+                  {!tasks.some((item) => item.businessStatus === state) && (
+                    <p className="column-empty">暂无目标</p>
                   )}
                 </section>
               ))}
             </div>
           </>
         )}
-        {tab === "services" && (
-          <div className="services">
-            {services.map((s) => (
-              <article className="service-card" key={s.id}>
-                <span className="service-icon">◈</span>
-                <h2>{s.name}</h2>
-                <p>{s.description || "独立运行的 Homelab 服务"}</p>
-                <small>{s.url}</small>
-                <pre>{s.operations || "尚未添加运维说明。"}</pre>
-                <div>
-                  <a href={s.url} target="_blank" rel="noreferrer">
-                    打开服务 ↗
-                  </a>
-                  <button
-                    onClick={() => {
-                      setEditingService(s);
-                      setModal("service");
-                    }}
-                  >
-                    编辑
-                  </button>
-                  <button
-                    onClick={() => {
-                      setTab("tasks");
-                      setModal("task");
-                    }}
-                  >
-                    新建运维目标
-                  </button>
-                </div>
-              </article>
-            ))}
-            {!services.length && (
-              <div className="empty-state">
-                <span>◈</span>
-                <h2>为你的服务留一个入口</h2>
-                <p>
-                  添加财务管理、模型实验室或其他应用。
-                  <br />
-                  需要操作它时，交给 Agent 一个明确的目标。
-                </p>
-                <button className="primary" onClick={() => setModal("service")}>
-                  添加第一个服务
-                </button>
-              </div>
-            )}
-          </div>
-        )}
-        {tab === "about" && (
-          <div className="about">
-            <h2>提出假设，行动，再验证。</h2>
-            <div className="flow">
-              {["给定目标", "确认计划", "自主实验", "验证成果", "保留经验"].map(
-                (x, i) => (
-                  <div key={x}>
-                    <small>0{i + 1}</small>
-                    <strong>{x}</strong>
+        {tab === "plugins" && (
+          <>
+            <div className="plugin-grid">
+              {snapshot.plugins.map((item) => (
+                <article className="panel plugin-card" key={item.id}>
+                  <div className="section-heading">
+                    <h2>{item.name}</h2>
+                    <Badge
+                      state={
+                        item.enabled
+                          ? item.online
+                            ? "online"
+                            : "offline"
+                          : "stopped"
+                      }
+                      text={
+                        item.enabled
+                          ? item.online
+                            ? "在线"
+                            : "离线"
+                          : "已停用"
+                      }
+                    />
                   </div>
-                ),
-              )}
-            </div>
-            <p>
-              refbox 是你的 Homelab 看板和控制层。Pi Durable
-              负责长期执行与恢复，独立业务保持自己的服务与数据。
-            </p>
-            <p>
-              规划阶段不会执行运维命令。确认后 Agent
-              在约定目标下自主工作，验证成功后停止。你可以随时补充指引、停止或继续。
-            </p>
-            <p>
-              Agent 可以开发 refbox 的改进；正在运行的版本由你决定何时更新。
-            </p>
-            <a
-              href="https://github.com/WASIDJ/refbox"
-              target="_blank"
-              rel="noreferrer"
-            >
-              查看项目与需求讨论 ↗
-            </a>
-          </div>
-        )}
-        <footer className="page-footer">
-          REFBOX <span>持续尝试，有据可循。</span>
-          <span>个人工作空间</span>
-        </footer>
-      </main>
-
-      {task && (
-        <div className="drawer-backdrop" onClick={() => setSelected("")}>
-          <section className="drawer" onClick={(e) => e.stopPropagation()}>
-            <div className="drawer-top">
-              <span className="eyebrow">GOAL / {task.id.slice(-6)}</span>
-              <button aria-label="关闭任务详情" onClick={() => setSelected("")}>
-                ×
-              </button>
-            </div>
-            <Tag state={task.status} />
-            <h1>{task.title}</h1>
-            <p className="goal-text">{task.goal}</p>
-            <div className="task-info">
-              <span>{task.model}</span>
-              <span>{task.cwd}</span>
-            </div>
-            <div className="detail-nav">
-              {[
-                ["overview", "目标与控制"],
-                ["logs", "运行过程"],
-                ["results", "实验与成果"],
-                ["reports", "汇报"],
-              ].map(([id, name]) => (
-                <button
-                  className={detailTab === id ? "active" : ""}
-                  key={id}
-                  onClick={() => setDetailTab(id)}
-                >
-                  {name}
-                </button>
-              ))}
-            </div>
-            {error && (
-              <p className="error" role="alert">
-                {error}
-              </p>
-            )}
-            {detailTab === "overview" && (
-              <div className="detail-content">
-                {task.reason && <div className="notice">{task.reason}</div>}
-                {task.status === "draft" && (
-                  <div className="notice">
-                    <h3>先明确执行标准</h3>
-                    <p>Agent 会提出计划与验证命令。确认前不会操作你的机器。</p>
+                  <p>{item.description}</p>
+                  <p className="muted">
+                    版本 {item.version} · {item.id}
+                  </p>
+                  {item.error && <p className="notice warning">{item.error}</p>}
+                  <dl className="plugin-capabilities">
+                    <div>
+                      <dt>资源</dt>
+                      <dd>{item.manifest.resources?.length ?? 0}</dd>
+                    </div>
+                    <div>
+                      <dt>工具</dt>
+                      <dd>{item.manifest.tools?.length ?? 0}</dd>
+                    </div>
+                    <div>
+                      <dt>事件</dt>
+                      <dd>{item.manifest.events?.length ?? 0}</dd>
+                    </div>
+                    <div>
+                      <dt>验证项</dt>
+                      <dd>{item.manifest.verification?.checks?.length ?? 0}</dd>
+                    </div>
+                  </dl>
+                  <div className="button-row">
                     <button
                       className="primary"
+                      disabled={!item.enabled || !item.online}
+                      onClick={() => {
+                        setWorkspaceId(item.id);
+                        changeTab("workspace");
+                      }}
+                    >
+                      打开工作区
+                    </button>
+                    <button
                       disabled={pending}
-                      onClick={() => action("plan")}
+                      onClick={() =>
+                        void perform(
+                          () =>
+                            api(
+                              `/platform/plugins/${encodeURIComponent(item.id)}/enable`,
+                              { enabled: !item.enabled },
+                            ),
+                          item.enabled ? "插件已停用" : "插件已启用",
+                        )
+                      }
                     >
-                      让 Agent 制定计划 →
+                      {item.enabled ? "停用插件" : "启用插件"}
                     </button>
                   </div>
-                )}
-                {task.status === "planning" && (
-                  <div className="notice">
-                    正在制定计划，进入“运行过程”查看进展。
-                  </div>
-                )}
-                {task.plan && (
-                  <div className="plan-form">
-                    <h3>
-                      {task.status === "awaiting_confirmation"
-                        ? "确认执行计划"
-                        : "执行标准"}
-                    </h3>
-                    <label>
-                      执行步骤
-                      <textarea
-                        value={draft.steps}
-                        onChange={(e) =>
-                          setDraft({ ...draft, steps: e.target.value })
-                        }
-                      />
-                    </label>
-                    <label>
-                      完成标准
-                      <textarea
-                        value={draft.criteria}
-                        onChange={(e) =>
-                          setDraft({ ...draft, criteria: e.target.value })
-                        }
-                      />
-                    </label>
-                    <label>
-                      验证命令
-                      <textarea
-                        className="code"
-                        value={draft.verificationCommand}
-                        onChange={(e) =>
-                          setDraft({
-                            ...draft,
-                            verificationCommand: e.target.value,
-                          })
-                        }
-                      />
-                    </label>
-                    <small>
-                      宿主执行该命令，退出码 0
-                      表示达到标准。请确认命令实际检验了目标。
-                    </small>
-                    {["awaiting_confirmation", "blocked", "stopped"].includes(
-                      task.status,
-                    ) && (
-                      <button
-                        className="primary"
-                        disabled={pending}
-                        onClick={() => action("approve", draft)}
-                      >
-                        确认标准并开始执行 →
-                      </button>
-                    )}
-                  </div>
-                )}
-                {["running", "planning", "stopping"].includes(task.status) && (
-                  <button
-                    className="danger"
-                    disabled={pending || task.status === "stopping"}
-                    onClick={() => action("stop")}
-                  >
-                    {task.status === "stopping" ? "正在停止…" : "停止当前执行"}
-                  </button>
-                )}
-                {["stopped", "blocked"].includes(task.status) && (
-                  <div className="actions">
-                    {task.approvedPlan && (
-                      <button
-                        className="primary"
-                        disabled={pending}
-                        onClick={() => action("continue")}
-                      >
-                        继续已批准的任务
-                      </button>
-                    )}
-                    <button disabled={pending} onClick={() => action("plan")}>
-                      重新制定计划
-                    </button>
-                  </div>
-                )}
-                {task.status === "running" && (
-                  <form
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      void action("steer", { message: guidance }).then((ok) => {
-                        if (ok) setGuidance("");
-                      });
-                    }}
-                  >
-                    <label>
-                      补充指引
-                      <textarea
-                        placeholder="告诉 Agent 新发现，或调整下一步的重点…"
-                        value={guidance}
-                        onChange={(e) => setGuidance(e.target.value)}
-                        required
-                      />
-                    </label>
-                    <button disabled={pending}>发送指引 ↗</button>
-                  </form>
-                )}
-              </div>
-            )}
-            {detailTab === "logs" && (
-              <div className="detail-content logs">
-                {(view?.entries ?? []).flatMap((e) =>
-                  (e.model ?? []).map((m, i) => (
-                    <article
-                      key={e.id + ":" + i}
-                      className={"log-entry " + m.role}
-                    >
-                      <small>
-                        {m.role === "user"
-                          ? "指令"
-                          : m.role === "assistant"
-                            ? "Agent"
-                            : m.role === "toolResult"
-                              ? "工具结果"
-                              : "系统配置"}{" "}
-                        · {String(e.id).slice(-6)}
-                      </small>
-                      {m.role === "system" ? (
-                        <p>执行配置已保存。</p>
-                      ) : typeof m.content === "string" ? (
-                        <pre>{m.content}</pre>
-                      ) : (
-                        m.content
-                          .filter((x) => x.type !== "thinking")
-                          .map((block, j) => (
-                            <pre key={j}>
-                              {block.text ??
-                                (block.type === "toolCall"
-                                  ? `${block.name}\n${JSON.stringify(block.arguments, null, 2)}`
-                                  : "")}
-                            </pre>
-                          ))
-                      )}
-                    </article>
-                  )),
-                )}
-                {view && Object.keys(view.docs).length > 0 && (
                   <details>
-                    <summary>原生执行状态与用量</summary>
-                    <pre>{JSON.stringify(view.docs, null, 2)}</pre>
-                  </details>
-                )}
-                {!view?.entries.length && (
-                  <p className="muted">尚无运行记录。</p>
-                )}
-              </div>
-            )}
-            {detailTab === "results" && (
-              <div className="detail-content">
-                <h3>
-                  实验记录{" "}
-                  <span className="count">{task.experiments.length}</span>
-                </h3>
-                {task.experiments.map((e) => (
-                  <article className="result-card" key={e.id}>
-                    <small>{time(e.at)}</small>
-                    <h4>{e.hypothesis}</h4>
-                    <p>{e.conclusion}</p>
-                    <small>
-                      {e.evidenceEntries.length} 条关联工具证据 · 结论由 Agent
-                      记录
-                    </small>
-                    {e.artifacts.map((p) => (
-                      <button
-                        className="artifact"
-                        key={p}
-                        onClick={() => showArtifact(p)}
-                      >
-                        ↗ {p}
-                      </button>
+                    <summary>能力清单</summary>
+                    <p className="muted break-word">{item.manifestUrl}</p>
+                    {item.manifest.tools?.map((tool) => (
+                      <p key={tool.id}>
+                        <strong>{tool.name}</strong> — {tool.description}
+                      </p>
                     ))}
-                  </article>
-                ))}
-                {!task.experiments.length && (
-                  <p className="muted">尚无实验记录。</p>
-                )}
-                <h3>实际验证</h3>
-                {task.verifications.map((v, i) => (
-                  <article className="result-card" key={i}>
-                    <b className={v.exitCode === 0 ? "success" : "failure"}>
-                      退出码 {v.exitCode}
-                    </b>
-                    <p>{v.summary}</p>
-                    <pre>{v.command}</pre>
-                    <details>
-                      <summary>查看验证输出</summary>
-                      <pre>{v.output || "（无输出）"}</pre>
-                    </details>
-                  </article>
-                ))}
-                {!task.verifications.length && (
-                  <p className="muted">尚未执行验证。</p>
-                )}
-              </div>
+                    <pre>{JSON.stringify(item.manifest, null, 2)}</pre>
+                  </details>
+                </article>
+              ))}
+            </div>
+            {!snapshot.plugins.length && (
+              <Empty title="添加你的第一个业务插件">
+                插件声明工作区、资源、工具、事件和验证项。可以先接入监控或个人便笺服务。
+              </Empty>
             )}
-            {detailTab === "reports" && (
-              <div className="detail-content">
-                <div className="report-heading">
-                  <h3>进展汇报</h3>
-                  <button disabled={pending} onClick={() => action("report")}>
-                    保存今日汇报
-                  </button>
-                </div>
-                <p className="muted">
-                  每天 09:00 自动保存。当天已有汇报不会重复生成。
+          </>
+        )}
+        {tab === "workspace" &&
+          (plugin ? (
+            <section className="plugin-workspace">
+              <div className="workspace-info">
+                <Badge state={plugin.online ? "online" : "offline"} />
+                <span className="muted">
+                  {plugin.name} · v{plugin.version}
+                </span>
+                <button
+                  disabled={pending || !plugin.online}
+                  onClick={() => setFrameVersion((version) => version + 1)}
+                >
+                  刷新工作区
+                </button>
+              </div>
+              {plugin.enabled && plugin.online ? (
+                <iframe
+                  key={`${plugin.id}:${frameVersion}`}
+                  title={plugin.workspace.title || plugin.name}
+                  src={`/api/platform/plugins/${encodeURIComponent(plugin.id)}/proxy/${plugin.workspace.path.replace(/^\//, "")}`}
+                  sandbox="allow-scripts allow-forms"
+                />
+              ) : (
+                <p className="notice warning">
+                  {plugin.enabled
+                    ? "插件离线，业务数据仍由插件服务保存。恢复服务后刷新。"
+                    : "插件已停用，可在插件管理中启用。"}
+                  {plugin.error && ` ${plugin.error}`}
                 </p>
-                {[...task.reports].reverse().map((r) => (
-                  <article className="report-card" key={r.date}>
-                    <small>{time(r.at)}</small>
-                    <pre>{r.markdown}</pre>
-                  </article>
-                ))}
-                {!task.reports.length && (
-                  <div className="notice">
-                    汇报会保存在这里，关联实验、验证结果和后续计划。
-                  </div>
-                )}
+              )}
+              <PluginTools
+                key={plugin.id}
+                plugin={plugin}
+                pending={pending}
+                perform={perform}
+                onResult={() => setFrameVersion((version) => version + 1)}
+              />
+            </section>
+          ) : (
+            <Empty title="工作区暂不可用">
+              请在插件管理中选择一个已启用的插件。
+            </Empty>
+          ))}
+      </main>
+      {task && (
+        <TaskDetail
+          key={task.id}
+          task={task}
+          refresh={refresh}
+          onClose={() => setSelectedTask("")}
+        />
+      )}
+      {incident && (
+        <Modal
+          title="修复事件"
+          onClose={() => {
+            setSelectedIncident("");
+            setError("");
+          }}
+          wide
+        >
+          <div className="incident-title">
+            <h3>{incidentResource?.name ?? incident.resourceId}</h3>
+            <div className="button-row">
+              <Badge state={incident.status} />
+              <Badge state={incident.verification} />
+              <span>重启 {incident.attempts} / 2 次</span>
+            </div>
+            <p>{incident.reason || "等待诊断结果"}</p>
+          </div>
+          {error && (
+            <p className="notice error" role="alert">
+              {error}
+            </p>
+          )}
+          {message && (
+            <p className="notice success" role="status">
+              {message}
+            </p>
+          )}
+          <ol className="repair-flow" aria-label="修复流程">
+            {[
+              ["diagnosing", "诊断"],
+              ["acting", "授权修复"],
+              ["proving", "独立验证"],
+              ["closed", "关闭事件"],
+            ].map(([id, name]) => (
+              <li key={id} className={incident.status === id ? "current" : ""}>
+                {name}
+              </li>
+            ))}
+          </ol>
+          <p className="muted">
+            最多两次授权重启。恢复需要三个连续健康样本与业务检查通过，证据不足会保留事件。
+          </p>
+          <div className="button-row">
+            <button
+              className="primary"
+              disabled={
+                pending ||
+                incident.attempts >= 2 ||
+                incident.status === "closed" ||
+                !incidentResource?.restartAllowed
+              }
+              onClick={() =>
+                void perform(
+                  () =>
+                    api(
+                      `/platform/incidents/${encodeURIComponent(incident.id)}/repair`,
+                      {},
+                    ),
+                  "已请求授权修复",
+                )
+              }
+            >
+              重启服务并检查
+            </button>
+            <button
+              disabled={pending || incident.status === "closed"}
+              onClick={() =>
+                void perform(
+                  () =>
+                    api(
+                      `/platform/incidents/${encodeURIComponent(incident.id)}/verify`,
+                      {},
+                    ),
+                  "已请求独立验证",
+                )
+              }
+            >
+              重新验证
+            </button>
+            <button
+              disabled={pending || incident.status === "closed"}
+              onClick={() =>
+                void perform(
+                  () =>
+                    api(
+                      `/platform/incidents/${encodeURIComponent(incident.id)}/diagnose`,
+                      {},
+                    ),
+                  "已请求 Agent 诊断",
+                )
+              }
+            >
+              继续诊断
+            </button>
+          </div>
+          {incident.attempts >= 2 && incident.status !== "closed" && (
+            <p className="notice warning">
+              已用完两次重启，需要你处理；Agent 仍可继续诊断。
+            </p>
+          )}
+          {!incidentResource?.restartAllowed && (
+            <p className="muted">该资源没有预授权重启动作。</p>
+          )}
+          <dl className="key-values">
+            <div>
+              <dt>事件</dt>
+              <dd>{incident.id}</dd>
+            </div>
+            <div>
+              <dt>版本 / 环境</dt>
+              <dd>
+                {incident.version} / {incident.environmentId}
+              </dd>
+            </div>
+            <div>
+              <dt>开始 / 更新</dt>
+              <dd>
+                {timestamp(incident.openedAt)} / {timestamp(incident.updatedAt)}
+              </dd>
+            </div>
+          </dl>
+          {incident.diagnosisId && (
+            <section className="section-card diagnosis-summary">
+              <div className="section-heading">
+                <h3>Agent 诊断</h3>
+                <Badge
+                  state={incident.diagnosisStatus ?? "unknown"}
+                  text={
+                    incident.diagnosisStatus === "running"
+                      ? "诊断中"
+                      : incident.diagnosisStatus === "completed"
+                        ? "诊断完成"
+                        : incident.diagnosisStatus === "interrupted"
+                          ? "诊断中断"
+                          : "等待诊断状态"
+                  }
+                />
               </div>
-            )}
-          </section>
-        </div>
+              <p className="diagnosis-text">
+                {incident.diagnosisSummary ||
+                  "正在分析最新观测和插件声明的只读能力。"}
+              </p>
+              <p className="muted">
+                诊断建议用于指导下一步，恢复结论由独立验证给出。
+              </p>
+              <span className="muted break-word">
+                诊断记录：{incident.diagnosisId}
+              </span>
+            </section>
+          )}
+          <h3>验证证据</h3>
+          {snapshot.evidence
+            .filter((evidence) => evidence.incidentId === incident.id)
+            .map((evidence) => (
+              <EvidenceCard key={evidence.id} evidence={evidence} />
+            ))}
+          {!snapshot.evidence.some(
+            (evidence) => evidence.incidentId === incident.id,
+          ) && (
+            <Empty title="尚无独立验证结果">
+              修复动作与验证结果分别记录，等待新鲜证据。
+            </Empty>
+          )}
+          <h3>事件进展</h3>
+          <ol className="activity-list">
+            {snapshot.events
+              .filter((event) => event.incidentId === incident.id)
+              .map((event) => (
+                <li key={event.id}>
+                  <time>{timestamp(event.at)}</time>
+                  <span>{event.message}</span>
+                </li>
+              ))}
+          </ol>
+        </Modal>
       )}
       {modal && (
-        <div className="modal-backdrop" onClick={() => setModal("")}>
-          <section className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="drawer-top">
-              <span className="eyebrow">
-                {modal === "task" ? "NEW GOAL" : "SERVICE DIRECTORY"}
-              </span>
-              <button aria-label="关闭新建窗口" onClick={() => setModal("")}>
-                ×
+        <Modal
+          title={modal === "task" ? "新建目标" : "注册插件"}
+          onClose={() => {
+            setModal("");
+            setError("");
+          }}
+        >
+          {error && (
+            <p className="notice error" role="alert">
+              {error}
+            </p>
+          )}
+          {modal === "task" ? (
+            <form onSubmit={createTask}>
+              <label>
+                目标名称
+                <input
+                  autoFocus
+                  value={newTask.title}
+                  onChange={(event) =>
+                    setNewTask({ ...newTask, title: event.target.value })
+                  }
+                  required
+                  maxLength={200}
+                />
+              </label>
+              <label>
+                目标与背景
+                <textarea
+                  value={newTask.goal}
+                  onChange={(event) =>
+                    setNewTask({ ...newTask, goal: event.target.value })
+                  }
+                  required
+                />
+              </label>
+              <label>
+                工作目录
+                <input
+                  value={newTask.cwd}
+                  onChange={(event) =>
+                    setNewTask({ ...newTask, cwd: event.target.value })
+                  }
+                  placeholder="/绝对路径/项目目录"
+                  required
+                />
+              </label>
+              <label>
+                模型
+                <select
+                  value={newTask.model}
+                  onChange={(event) =>
+                    setNewTask({ ...newTask, model: event.target.value })
+                  }
+                >
+                  {!models.some((model) => model.id === "kimi-k3") && (
+                    <option value="kimi-k3">kimi-k3</option>
+                  )}
+                  {models.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <p className="muted">创建后制定计划，确认标准后开始实际执行。</p>
+              <button className="primary" disabled={pending}>
+                {pending ? "正在创建…" : "创建目标"}
               </button>
-            </div>
-            <h2>{modal === "task" ? "交给 Agent 一个目标" : "添加独立服务"}</h2>
-            {error && (
-              <p className="error" role="alert">
-                {error}
+            </form>
+          ) : (
+            <form onSubmit={registerPlugin}>
+              <label>
+                Manifest 地址
+                <input
+                  autoFocus
+                  type="url"
+                  value={manifestUrl}
+                  onChange={(event) => setManifestUrl(event.target.value)}
+                  placeholder="http://127.0.0.1:18804/manifest"
+                  required
+                />
+              </label>
+              <label>
+                凭据环境变量名（可选）
+                <input
+                  value={credentialEnv}
+                  onChange={(event) => setCredentialEnv(event.target.value)}
+                  placeholder="REFBOX_PLUGIN_TOKEN"
+                  pattern="[A-Za-z_][A-Za-z0-9_]*"
+                />
+              </label>
+              <p className="muted">
+                填写本地独立服务的能力清单地址。凭据从服务端环境变量读取。
               </p>
-            )}
-            {modal === "task" ? (
-              <form onSubmit={createTask}>
-                <label>
-                  目标名称
-                  <input
-                    name="title"
-                    autoFocus
-                    placeholder="例如：为财务服务生成月度报告"
-                    required
-                    maxLength={200}
-                  />
-                </label>
-                <label>
-                  目标与背景
-                  <textarea
-                    name="goal"
-                    placeholder="希望完成什么？有哪些已知条件或约束？"
-                    required
-                  />
-                </label>
-                <label>
-                  工作目录
-                  <input name="cwd" placeholder="/绝对路径/项目目录" required />
-                </label>
-                <label>
-                  模型
-                  <select
-                    name="model"
-                    defaultValue={
-                      models.some((m) => m.id === "kimi-k3")
-                        ? "kimi-k3"
-                        : models[0]?.id
-                    }
-                  >
-                    {models.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <p className="muted">
-                  创建后先制定计划，确认标准后才开始实际执行。
-                </p>
-                <button className="primary" disabled={pending}>
-                  创建目标 →
-                </button>
-              </form>
-            ) : (
-              <form onSubmit={saveService}>
-                <label>
-                  服务名称
-                  <input
-                    name="name"
-                    autoFocus
-                    defaultValue={editingService?.name}
-                    required
-                  />
-                </label>
-                <label>
-                  访问地址
-                  <input
-                    name="url"
-                    type="url"
-                    placeholder="http://服务地址"
-                    defaultValue={editingService?.url}
-                    required
-                  />
-                </label>
-                <label>
-                  简介
-                  <textarea
-                    name="description"
-                    defaultValue={editingService?.description}
-                  />
-                </label>
-                <label>
-                  运维说明
-                  <textarea
-                    name="operations"
-                    placeholder="所在机器、启动方式、API 或相关文档…请勿填写密钥。"
-                    defaultValue={editingService?.operations}
-                  />
-                </label>
-                <button className="primary" disabled={pending}>
-                  保存服务
-                </button>
-              </form>
-            )}
-          </section>
-        </div>
-      )}
-      {artifact && (
-        <div className="modal-backdrop" onClick={() => setArtifact(null)}>
-          <section
-            className="modal artifact-modal"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="drawer-top">
-              <strong>{artifact.path}</strong>
-              <button aria-label="关闭产物" onClick={() => setArtifact(null)}>
-                ×
+              <button className="primary" disabled={pending}>
+                {pending ? "正在注册…" : "注册并读取能力"}
               </button>
-            </div>
-            <small>文本预览，最多读取 1 MiB。</small>
-            <pre>{artifact.text}</pre>
-          </section>
-        </div>
+            </form>
+          )}
+        </Modal>
       )}
     </div>
   );
