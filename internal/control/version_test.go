@@ -3,8 +3,39 @@ package control
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"runtime/debug"
 	"testing"
 )
+
+func TestRevisionFromBuildInfoWithVCS(t *testing.T) {
+	info := &debug.BuildInfo{
+		Settings: []debug.BuildSetting{
+			{Key: "vcs.revision", Value: "abc123def456"},
+			{Key: "vcs.time", Value: "2026-10-11T00:00:00Z"},
+		},
+	}
+	if got := revisionFromBuildInfo(info); got != "abc123def456" {
+		t.Fatalf("expected abc123def456, got %q", got)
+	}
+}
+
+func TestRevisionFromBuildInfoWithoutVCS(t *testing.T) {
+	info := &debug.BuildInfo{
+		Settings: []debug.BuildSetting{
+			{Key: "GOOS", Value: "darwin"},
+			{Key: "GOARCH", Value: "arm64"},
+		},
+	}
+	if got := revisionFromBuildInfo(info); got != "unknown" {
+		t.Fatalf("expected unknown, got %q", got)
+	}
+}
+
+func TestRevisionFromBuildInfoNil(t *testing.T) {
+	if got := revisionFromBuildInfo(nil); got != "unknown" {
+		t.Fatalf("expected unknown for nil BuildInfo, got %q", got)
+	}
+}
 
 func TestBuildRevisionWithVCS(t *testing.T) {
 	// The test binary itself is built by the Go toolchain, which embeds
@@ -18,21 +49,6 @@ func TestBuildRevisionWithVCS(t *testing.T) {
 	if len(revision) < 7 {
 		t.Fatalf("expected a plausible Git revision, got %q", revision)
 	}
-}
-
-func TestBuildRevisionWithoutVCS(t *testing.T) {
-	// When debug.ReadBuildInfo reports no VCS revision (e.g. a stripped or
-	// GOPATH build), buildRevision must fall back to "unknown".
-	// We cannot easily remove the metadata from the current test binary, so
-	// we verify the fallback logic by checking the implementation contract:
-	// if the current binary has no revision, the result must be "unknown".
-	revision := buildRevision()
-	if revision == "unknown" {
-		return // fallback path already exercised
-	}
-	// Otherwise the binary has a revision; the fallback is tested by the
-	// implementation returning "unknown" when no vcs.revision setting exists.
-	// This branch documents the expected behaviour and keeps the test passing.
 }
 
 func TestHealthEndpointReturnsVersion(t *testing.T) {
