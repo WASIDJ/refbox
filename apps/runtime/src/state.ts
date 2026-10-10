@@ -1,18 +1,30 @@
 import { defineDoc } from "@earendil-works/pi-durable";
+import type { JsonValue } from "@earendil-works/chord";
 
 export type Status =
   | "draft"
   | "planning"
   | "awaiting_confirmation"
+  | "awaiting_verification"
   | "running"
   | "stopping"
   | "stopped"
   | "blocked"
   | "completed";
+export type GoalCheck = {
+  id: string;
+  kind: "file_exists" | "file_contains" | "json_equals" | "command";
+  path?: string;
+  contains?: string;
+  jsonPath?: string;
+  equals?: JsonValue;
+  command?: "tests" | "build" | "ui" | "diff";
+};
 export type Plan = {
   steps: string;
   criteria: string;
   verificationCommand: string;
+  checks?: GoalCheck[];
 };
 export type Experiment = {
   id: string;
@@ -48,6 +60,7 @@ export type Task = {
   reason: string;
   submissionId: string;
   verified: boolean;
+  autonomous?: boolean;
 };
 export type Service = {
   id: string;
@@ -61,7 +74,7 @@ export type Command = {
   hash: string;
   action: string;
   taskId: string;
-  body: Record<string, string>;
+  body: Record<string, JsonValue>;
   done: boolean;
 };
 export type Board = {

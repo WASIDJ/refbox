@@ -1,6 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { readFile, mkdir } from "node:fs/promises";
 import { resolve, extname, sep } from "node:path";
+import type { Task } from "../src/types";
 
 const root = resolve(import.meta.dirname, "../../..");
 const dist = resolve(root, "apps/web/dist");
@@ -198,7 +199,7 @@ const initial = {
 };
 
 type Mock = {
-  state: typeof initial;
+  state: Omit<typeof initial, "tasks"> & { tasks: Task[] };
   legacy: typeof legacy;
   calls: { path: string; body: Record<string, unknown> }[];
 };
@@ -259,6 +260,49 @@ async function installMock(page: Page): Promise<Mock> {
     if (request.method() === "POST") {
       const body = request.postDataJSON() as Record<string, unknown>;
       mock.calls.push({ path, body });
+      if (path === "/api/platform/goals") {
+        const added: Task = {
+          ...baseTask,
+          id: "goal-auto",
+          conversationId: "native-auto",
+          title: String(body.goal).slice(0, 40),
+          goal: String(body.goal),
+          cwd: "/isolated/goal-auto",
+          businessStatus: "active",
+          executionStatus: "planning",
+          verificationStatus: "pending",
+          legacyVerified: false,
+          goalLoop: {
+            phase: "planning",
+            rounds: 0,
+            maxRounds: 6,
+            reason: "正在读取上下文并形成可验证方案",
+            reviews: [],
+          },
+        };
+        mock.state.tasks.push(added);
+        return json(added, 201);
+      }
+      const auto = mock.state.tasks.find(
+        (task) => task.goalLoop && path.includes(`/${task.id}/`),
+      );
+      if (auto?.goalLoop) {
+        if (path.endsWith("/stop")) {
+          auto.goalLoop.phase = "paused";
+          auto.goalLoop.reason = "你已停止推进";
+          auto.executionStatus = "stopped";
+          return json(auto);
+        }
+        if (path.endsWith("/continue")) {
+          auto.goalLoop.phase = "executing";
+          auto.goalLoop.reason = "根据独立反馈继续改进";
+          auto.executionStatus = "running";
+          return json(auto);
+        }
+        if (path.endsWith("/steer")) return json(auto);
+        if (path.endsWith("/accept"))
+          return json({ error: "自动目标只能由独立验证完成" }, 409);
+      }
       if (path.endsWith("/status")) {
         if (
           body.status === "done" &&
@@ -343,7 +387,19 @@ async function installMock(page: Page): Promise<Mock> {
     }
     if (path.endsWith("/view"))
       return json({
-        task: mock.legacy,
+        task: (() => {
+          const auto = mock.state.tasks.find(
+            (task) => task.goalLoop && path.includes(`/${task.id}/`),
+          );
+          return auto
+            ? {
+                ...mock.legacy,
+                ...auto,
+                id: auto.conversationId,
+                status: auto.executionStatus,
+              }
+            : mock.legacy;
+        })(),
         view: {
           entries: [
             {
@@ -422,6 +478,7 @@ test("business status errors surface and human acceptance preserves the proof di
   await page.getByRole("button", { name: "长期任务", exact: true }).click();
   await page.getByRole("button", { name: /生成本月报告/ }).click();
   const dialog = page.getByRole("dialog", { name: "任务详情" });
+  await dialog.getByText("高级：旧版任务控制", { exact: true }).click();
   await dialog.getByLabel("任务状态").selectOption("done");
   await dialog.getByRole("button", { name: "保存状态" }).click();
   await expect(dialog.getByRole("alert")).toHaveText(
@@ -465,6 +522,7 @@ test("acknowledged business status is visible while background snapshot refresh 
   await page.getByRole("button", { name: "长期任务", exact: true }).click();
   await page.getByRole("button", { name: /生成本月报告/ }).click();
   const dialog = page.getByRole("dialog", { name: "任务详情" });
+  await dialog.getByText("高级：旧版任务控制", { exact: true }).click();
   let release!: () => void;
   const blocked = new Promise<void>((resolve) => {
     release = resolve;
@@ -537,6 +595,213 @@ test("plugins expose real workspaces and declared tools, with offline registrati
   ).toEqual({ text: "plugin-owned note" });
 });
 
+async function submitGoal(page: Page, goal: string) {
+  await page.getByRole("button", { name: "长期任务", exact: true }).click();
+  await page.getByRole("button", { name: "新建目标", exact: true }).click();
+  await page.getByLabel("你想完成什么？").fill(goal);
+  await page.getByRole("button", { name: "开始推进", exact: true }).click();
+  return page.getByRole("dialog", { name: "任务详情" });
+}
+
+test("one goal input starts autonomous work without manual plan or command", async ({
+  page,
+}) => {
+  const mock = await installMock(page);
+  await login(page);
+  await page.getByRole("button", { name: "长期任务", exact: true }).click();
+  await page.getByRole("button", { name: "新建目标", exact: true }).click();
+  const creation = page.getByRole("dialog", { name: "新建目标" });
+  await expect(creation.getByRole("textbox")).toHaveCount(1);
+  await expect(creation.getByLabel("目标名称")).toHaveCount(0);
+  await expect(creation.getByLabel("工作目录")).toHaveCount(0);
+  const goal = "生成包含三项统计的本月报告，并验证实际内容";
+  await creation.getByLabel("你想完成什么？").fill(goal);
+  await creation.getByRole("button", { name: "开始推进", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "任务详情" });
+  await expect(
+    dialog.getByRole("heading", { name: "形成执行方案", exact: true }),
+  ).toBeVisible();
+  expect(
+    mock.calls.find((call) => call.path === "/api/platform/goals")?.body,
+  ).toEqual({ goal });
+  expect(
+    mock.calls.some(
+      (call) =>
+        call.path === "/api/platform/tasks" || call.path.endsWith("/approve"),
+    ),
+  ).toBe(false);
+  await expect(dialog.getByLabel("执行检查命令")).toHaveCount(0);
+  await expect(dialog.getByLabel("验收依据")).toHaveCount(0);
+  await expect(
+    dialog.getByRole("button", { name: "让 Agent 制定计划" }),
+  ).toHaveCount(0);
+  await dialog.getByRole("button", { name: "停止推进", exact: true }).click();
+  await expect(
+    dialog.getByRole("heading", { name: "已暂停", exact: true }),
+  ).toBeVisible();
+  await dialog.getByRole("button", { name: "继续推进", exact: true }).click();
+  await expect(
+    dialog.getByRole("heading", { name: "持续推进", exact: true }),
+  ).toBeVisible();
+  await dialog
+    .getByLabel("补充执行建议")
+    .fill("检查实际输入数据，避免空白占位结果");
+  await dialog.getByRole("button", { name: "发送建议", exact: true }).click();
+  expect(mock.calls.find((call) => call.path.endsWith("/steer"))?.body).toEqual(
+    { message: "检查实际输入数据，避免空白占位结果" },
+  );
+  expect(mock.state.tasks.find((task) => task.goalLoop)?.goal).toBe(goal);
+});
+
+test("frozen contract, rejected result feedback and each independent proof stay visible", async ({
+  page,
+}) => {
+  const mock = await installMock(page);
+  await login(page);
+  const goal = "生成包含三项统计的本月报告，并验证实际内容";
+  await submitGoal(page, goal);
+  const auto = mock.state.tasks.find((task) => task.goalLoop)!;
+  const checks = [
+    {
+      id: "report-content",
+      kind: "file_contains" as const,
+      path: "report.txt",
+      contains: "收入、支出、结余",
+    },
+  ];
+  const contract = {
+    version: 1 as const,
+    goal,
+    criteria: "报告包含收入、支出和结余，且使用实际数据。",
+    checks,
+    definitionJson: JSON.stringify({
+      version: 1,
+      goal,
+      criteria: "报告包含收入、支出和结余，且使用实际数据。",
+      checks,
+    }),
+    hash: "contract-hash-fixed",
+    reviewConversationId: "contract-review-20",
+    reviewedAt: now,
+    summary: "独立审查已确认目标覆盖，验收标准固定。",
+  };
+  const rejected = "报告只有标题，缺少实际三项统计；请读取实际数据后补齐。";
+  auto.goalLoop = {
+    phase: "executing",
+    rounds: 2,
+    maxRounds: 6,
+    reason: "独立验证未通过，正在按反馈改进",
+    contract,
+    reviews: [
+      {
+        at: now,
+        verdict: "fail",
+        summary: rejected,
+        reviewConversationId: "result-review-21",
+        contractHash: contract.hash,
+        candidateId: "candidate-v1",
+        checks: [
+          {
+            id: "report-content",
+            passed: false,
+            detail: "实际文件只有标题",
+            witness: { content: "# 本月报告", sha256: "candidate-file-hash" },
+          },
+        ],
+      },
+    ],
+  };
+  auto.executionStatus = "running";
+  await page.getByRole("button", { name: "关闭任务详情" }).click();
+  await page.getByRole("button", { name: "刷新", exact: true }).click();
+  await page.locator(".task-card").filter({ hasText: goal }).click();
+  const dialog = page.getByRole("dialog", { name: "任务详情" });
+  await expect(dialog.getByText(rejected, { exact: true })).toBeVisible();
+  await expect(
+    dialog.getByText("已推进 2 / 6 轮", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    dialog.getByText(contract.criteria, { exact: true }),
+  ).toBeVisible();
+  await expect(dialog.getByLabel("任务状态")).toHaveCount(0);
+  await expect(dialog.getByLabel("验收依据")).toHaveCount(0);
+  await dialog.getByText("查看独立审查与标准溯源", { exact: true }).click();
+  await expect(dialog.getByText(contract.hash, { exact: true })).toBeVisible();
+  await expect(
+    dialog.getByText("contract-review-20", { exact: true }),
+  ).toBeVisible();
+  await mkdir(resolve(root, "var/screenshots"), { recursive: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.screenshot({
+    path: resolve(root, "var/screenshots/goal-loop-desktop.png"),
+    animations: "disabled",
+  });
+  await page.setViewportSize({ width: 375, height: 844 });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  expect(
+    await dialog.evaluate(
+      (element) => element.scrollWidth <= element.clientWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: resolve(root, "var/screenshots/goal-loop-mobile.png"),
+    animations: "disabled",
+  });
+  await dialog
+    .getByRole("button", { name: "成果与独立证明", exact: true })
+    .click();
+  await expect(dialog.getByText(rejected, { exact: true })).toBeVisible();
+  await dialog.getByText("查看实际检查与证明", { exact: true }).click();
+  await expect(dialog.getByText("candidate-v1", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("检查未通过", { exact: true })).toBeVisible();
+  await expect(
+    dialog.getByText("实际文件只有标题", { exact: true }),
+  ).toBeVisible();
+  expect(auto.businessStatus).toBe("active");
+  expect(auto.verificationStatus).toBe("pending");
+  auto.goalLoop.phase = "completed";
+  auto.goalLoop.rounds = 3;
+  auto.goalLoop.reason = "实际成果已通过独立验证";
+  auto.goalLoop.reviews.push({
+    at: now,
+    verdict: "pass",
+    summary: "三项实际数据及成果内容验证通过",
+    reviewConversationId: "result-review-22",
+    contractHash: contract.hash,
+    candidateId: "candidate-v2",
+    checks: [
+      { id: "report-content", passed: true, detail: "三项统计和实际输入一致" },
+    ],
+  });
+  auto.businessStatus = "done";
+  auto.verificationStatus = "pass";
+  auto.executionStatus = "completed";
+  await page.getByRole("button", { name: "关闭任务详情" }).click();
+  await page.getByRole("button", { name: "刷新", exact: true }).click();
+  await page.locator(".task-card").filter({ hasText: goal }).click();
+  await expect(
+    dialog.getByRole("heading", { name: "目标已验证", exact: true }),
+  ).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "停止推进" })).toHaveCount(0);
+  await dialog
+    .getByRole("button", { name: "成果与独立证明", exact: true })
+    .click();
+  await expect(
+    dialog.getByText("三项实际数据及成果内容验证通过", { exact: true }),
+  ).toBeVisible();
+  await expect(dialog.getByText(rejected, { exact: true })).toBeVisible();
+  expect(auto.goalLoop.contract?.hash).toBe(contract.hash);
+  expect(
+    mock.calls.some(
+      (call) => call.path.endsWith("/approve") || call.path.endsWith("/accept"),
+    ),
+  ).toBe(false);
+});
+
 test("keyboard login, default model, and responsive layouts have no horizontal overflow", async ({
   page,
 }) => {
@@ -564,7 +829,8 @@ test("keyboard login, default model, and responsive layouts have no horizontal o
   });
   await page.getByRole("button", { name: "长期任务", exact: true }).click();
   await page.getByRole("button", { name: "新建目标", exact: true }).click();
-  await expect(page.getByLabel("模型")).toHaveValue("kimi-k3");
+  await expect(page.getByLabel("你想完成什么？")).toBeVisible();
+  await expect(page.getByLabel("模型（可选）")).not.toBeVisible();
   await page.getByRole("button", { name: "关闭新建目标" }).press("Escape");
   await expect(page.getByRole("dialog", { name: "新建目标" })).toHaveCount(0);
   expect(

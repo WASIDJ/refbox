@@ -26,11 +26,13 @@ import (
 )
 
 type Config struct {
+	GoalDependenciesRoot                                                                string
 	EngineURL, EngineToken, PasswordHash, WebDir                                        string
 	SecureCookie                                                                        bool
 	PlatformDatabase, PlatformToken, BrokerURL, BrokerToken, VerifierURL, VerifierToken string
 	AutoRepair                                                                          bool
 	BuiltinPlugins                                                                      []PluginRegistration
+	GoalWorkspaceRoot, GoalSourceRepository, GoalModel                                  string
 }
 type PluginRegistration struct {
 	ManifestURL   string `json:"manifestUrl"`
@@ -44,7 +46,9 @@ type Server struct {
 	client         *http.Client
 	serviceClient  *http.Client
 	manifestClient *http.Client
+	goalClient     *http.Client
 	mu             sync.Mutex
+	goalCreateMu   sync.Mutex
 	failures       map[string][]time.Time
 	platform       *Platform
 }
@@ -80,6 +84,7 @@ func New(cfg Config) (*Server, error) {
 	}
 	s.serviceClient = &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
 	s.manifestClient = &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	s.goalClient = &http.Client{Timeout: 10 * time.Minute, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
 	s.proxy = httputil.NewSingleHostReverseProxy(u)
 	original := s.proxy.Director
 	s.proxy.Director = func(r *http.Request) {

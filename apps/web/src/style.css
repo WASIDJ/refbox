@@ -13,6 +13,94 @@
   --primary-hover: #194692;
   --white: #fff;
 }
+.goal-create-form > label textarea {
+  min-height: 150px;
+}
+.goal-advanced {
+  margin: 16px 0 24px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.goal-advanced > summary {
+  color: var(--muted);
+}
+.goal-advanced[open] > summary {
+  margin-bottom: 18px;
+}
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.checkbox-label input {
+  width: 18px;
+  min-height: 18px;
+  height: 18px;
+  margin: 0;
+}
+.goal-card-progress {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+}
+.goal-progress {
+  display: grid;
+  gap: 16px;
+}
+.goal-progress .section-card {
+  margin: 0;
+}
+.goal-phase h3 {
+  margin: 0;
+  font-size: 18px;
+}
+.goal-phase .section-heading {
+  flex-wrap: wrap;
+}
+.goal-feedback {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.goal-feedback p {
+  margin-top: 8px;
+}
+.goal-criteria {
+  white-space: pre-wrap;
+}
+.goal-check-list {
+  padding-left: 22px;
+  margin: 16px 0;
+}
+.goal-check-list li {
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.goal-contract details {
+  margin-top: 18px;
+}
+.goal-controls {
+  margin: 20px 0;
+}
+.goal-reviews {
+  margin: 24px 0;
+}
+.goal-metadata,
+.legacy-controls {
+  margin-top: 18px;
+}
+.legacy-controls[open] > summary {
+  margin-bottom: 18px;
+}
+.execution-checks {
+  margin: 24px 0;
+}
+.execution-checks[open] > summary {
+  margin-bottom: 16px;
+}
 * {
   box-sizing: border-box;
 }

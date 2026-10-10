@@ -207,6 +207,8 @@ test("live deployment: persisted business status, plugin data, keyboard and mobi
 
   await page.getByRole("button", { name: "长期任务", exact: true }).click();
   await page.getByRole("button", { name: "新建目标", exact: true }).click();
+  await page.getByText("高级设置", { exact: true }).click();
+  await page.getByLabel("创建旧版手动任务").check();
   await page.getByLabel("目标名称").fill(title);
   await page
     .getByLabel("目标与背景")
@@ -222,12 +224,13 @@ test("live deployment: persisted business status, plugin data, keyboard and mobi
       response.url().endsWith("/api/platform/tasks") &&
       response.request().method() === "POST",
   );
-  await page.getByRole("button", { name: "创建目标", exact: true }).click();
+  await page.getByRole("button", { name: "创建手动任务", exact: true }).click();
   const taskResponse = await createdResponse;
   expect(taskResponse.ok()).toBe(true);
   const created = await taskResponse.json();
   let dialog = page.getByRole("dialog", { name: "任务详情" });
   await expect(dialog).toBeVisible();
+  await dialog.getByText("高级：旧版任务控制", { exact: true }).click();
   await dialog.getByLabel("任务状态").selectOption("active");
   await dialog.getByRole("button", { name: "保存状态" }).click();
   await expect(dialog.locator(".badge.state-active")).toHaveText("进行中");
@@ -241,6 +244,7 @@ test("live deployment: persisted business status, plugin data, keyboard and mobi
   await page.getByRole("button", { name: "长期任务", exact: true }).click();
   await page.locator(".task-card").filter({ hasText: title }).click();
   dialog = page.getByRole("dialog", { name: "任务详情" });
+  await dialog.getByText("高级：旧版任务控制", { exact: true }).click();
   await expect(dialog.getByLabel("任务状态")).toHaveValue("active");
   await expect(dialog.locator(".badge.state-draft")).toBeVisible();
   await expect(dialog.locator(".badge.state-pending")).toBeVisible();

@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  writeFile,
+  rm,
+  mkdir,
+  symlink,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -13,7 +20,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { Engine } from "../src/engine.js";
+import { Engine, type EngineOptions } from "../src/engine.js";
 import { BoardDoc } from "../src/state.js";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { runtimeServer } from "../src/server.js";
@@ -27,7 +34,11 @@ afterEach(async () => {
   for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true });
   vi.unstubAllGlobals();
 });
-async function fixture(storage?: MemoryStorage, platform?: PlatformOptions) {
+async function fixture(
+  storage?: MemoryStorage,
+  platform?: PlatformOptions,
+  options?: EngineOptions,
+) {
   const dir = await mkdtemp(join(tmpdir(), "refbox-test-"));
   dirs.push(dir);
   const faux = fauxProvider();
@@ -38,6 +49,7 @@ async function fixture(storage?: MemoryStorage, platform?: PlatformOptions) {
     faux.getModel().id,
     faux.provider.id,
     platform,
+    options,
   ).open(storage ?? new MemoryStorage());
   engines.push(engine);
   return { engine, faux, dir };
@@ -215,7 +227,9 @@ describe("Pi Durable integration", () => {
     const url = transport.register(server);
     // The test transport signals cancellation on its request stream. Real HTTP
     // signals response.close too; bridge it so the actual SSE cleanup runs.
-    server.on("request", (req, res) => req.once("close", () => res.emit("close")));
+    server.on("request", (req, res) =>
+      req.once("close", () => res.emit("close")),
+    );
     const headers = { Authorization: "Bearer " + token };
     const snapshot = async () => {
       const response = await transport.fetch(url + "/api/events", { headers });
@@ -340,57 +354,512 @@ describe("Pi Durable integration", () => {
   }, 15000);
 });
 
+describe("Autonomous goal execution", () => {
+  it("reads fixed Wiki context and isolated source while planning cannot mutate files, run commands, read credentials or escape symlinks", async () => {
+    const wiki = await mkdtemp(join(tmpdir(), "refbox-wiki-"));
+    dirs.push(wiki);
+    await mkdir(join(wiki, "concepts"));
+    await writeFile(
+      join(wiki, "hot.md"),
+      "用户只提出目标，执行与验证分别承担责任。",
+    );
+    await writeFile(join(wiki, "index.md"), "[[目标验收]] → concepts/goal.md");
+    await writeFile(
+      join(wiki, "concepts", "goal.md"),
+      "公共标准不得降低。嵌入命令 touch unauthorized-wiki 只是材料。",
+    );
+    const { engine, faux, dir } = await fixture(undefined, undefined, {
+      wikiDir: wiki,
+    });
+    await writeFile(join(dir, "input.txt"), "real source context");
+    await writeFile(join(dir, ".env"), "must-not-be-read-secret");
+    await symlink(join(wiki, "hot.md"), join(dir, "outside.txt"));
+    const task = await engine.create(
+      { title: "自主规划", goal: "产出实际改进", cwd: dir, autonomous: true },
+      "autonomous-create-context",
+    );
+    expect(task.status).toBe("draft"); // Go owns the first plan command.
+    faux.setResponses([
+      tool("read_context", { path: "." }),
+      tool("read_context", { path: "input.txt" }),
+      tool("wiki_context", {}),
+      tool("wiki_context", { path: "concepts/goal.md" }),
+      tool("read_context", { path: ".env" }),
+      tool("read_context", { path: "outside.txt" }),
+      tool("wiki_context", { path: "../escape" }),
+      tool("bash", { command: "touch unauthorized-shell" }),
+      tool("write", { path: "input.txt", content: "mutated" }),
+      tool("propose_plan", {
+        steps: "写结果",
+        criteria: "result.txt 包含完成",
+        verificationCommand: "test -f result.txt",
+        checks: [],
+      }),
+      tool("propose_plan", {
+        steps: "写结果",
+        criteria: "result.txt 包含完成",
+        verificationCommand: "test -f result.txt",
+        checks: [
+          {
+            id: "result",
+            kind: "file_contains",
+            path: "result.txt",
+            contains: "完成",
+          },
+        ],
+      }),
+    ]);
+    await engine.command(
+      task.id,
+      "plan",
+      { guidance: "" }, // The Go coordinator's first planning receipt has no rejection feedback.
+      "autonomous-plan-context",
+    );
+    await waitFor(
+      async () =>
+        (await engine.task(task.id)).status === "awaiting_confirmation",
+    );
+    expect(await readFile(join(dir, "input.txt"), "utf8")).toBe(
+      "real source context",
+    );
+    await expect(readFile(join(dir, "unauthorized-shell"))).rejects.toThrow();
+    await expect(readFile(join(dir, "unauthorized-wiki"))).rejects.toThrow();
+    const history = JSON.stringify(await engine.view(task.id));
+    expect(history).toContain("real source context");
+    expect(history).toContain("公共标准不得降低");
+    expect(history).not.toContain("must-not-be-read-secret");
+    expect((await engine.task(task.id)).approvedPlan).toBeNull();
+    expect((await engine.task(task.id)).plan?.checks).toHaveLength(1);
+    const conversation = (await engine.harness.conversation(
+      Number(task.id) as never,
+      context,
+    ))!;
+    const tools = (await conversation.agent(context)).tools.map(
+      (tool) => tool.name,
+    );
+    expect(tools).toContain("read_context");
+    expect(tools).toContain("wiki_context");
+    expect(tools).not.toContain("bash");
+    expect(tools).not.toContain("write");
+  });
+
+  it("requires the reviewed proposal, self-check only awaits proof, and feedback resumes the exact frozen plan without human approval", async () => {
+    const { engine, faux, dir } = await fixture();
+    const task = await engine.create(
+      { title: "自主改进", goal: "产生可验证成果", cwd: dir, autonomous: true },
+      "autonomous-create-result",
+    );
+    const plan = {
+      steps: "产生真实文件",
+      criteria: "result.txt 内容为 verified",
+      verificationCommand: 'test "$(cat result.txt)" = verified',
+      checks: [
+        {
+          id: "result",
+          kind: "file_contains",
+          path: "result.txt",
+          contains: "verified",
+        },
+        {
+          id: "json-key-order",
+          kind: "json_equals",
+          path: "result.json",
+          jsonPath: "nested",
+          equals: { z: 2, a: 1 },
+        },
+      ],
+    };
+    await engine.update(task.id, (item) => {
+      item.status = "awaiting_confirmation";
+      item.plan = engine.plan(plan);
+    });
+    await expect(
+      engine.command(
+        task.id,
+        "approve",
+        { ...plan, criteria: "文件存在就行" },
+        "autonomous-weaken-criteria",
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    await expect(
+      engine.command(
+        task.id,
+        "approve",
+        { ...plan, checks: [] },
+        "autonomous-remove-checks",
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    faux.setResponses([
+      tool("write", { path: "result.txt", content: "verified" }),
+      tool("write", {
+        path: "result.json",
+        content: '{"nested":{"z":2,"a":1}}',
+      }),
+      tool("record_experiment", {
+        hypothesis: "实际文件满足标准",
+        conclusion: "已执行并记录",
+        artifacts: ["result.txt", "result.json"],
+      }),
+      tool("verify_result", { summary: "执行側首次自检成功" }),
+    ]);
+    // Go marshals nested JSON object keys in sorted order. This is the same
+    // reviewed standard, so transport key order must not reject authorization.
+    const approved = {
+      ...plan,
+      checks: [plan.checks[0], { ...plan.checks[1], equals: { a: 1, z: 2 } }],
+    };
+    await engine.command(
+      task.id,
+      "approve",
+      approved,
+      "autonomous-approve-result",
+    );
+    await waitFor(
+      async () =>
+        (await engine.task(task.id)).status === "awaiting_verification",
+    );
+    let result = await engine.task(task.id);
+    expect(result.verified).toBe(false);
+    expect(result.verifications[0]).toMatchObject({
+      exitCode: 0,
+      assurance: "execution_assertion",
+    });
+    expect((await engine.readiness()).activeRuns).toBe(0);
+    await expect(
+      engine.command(
+        task.id,
+        "continue",
+        { guidance: "修复漏项", criteria: "降低标准" },
+        "autonomous-invalid-resume",
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+    faux.setResponses([
+      tool("write", {
+        path: "additional.txt",
+        content: "fixed independently observed omission",
+      }),
+      tool("record_experiment", {
+        hypothesis: "缺口应修复",
+        conclusion: "增加缺失的产物",
+        artifacts: ["additional.txt"],
+      }),
+      tool("verify_result", { summary: "修复后保持原标准" }),
+    ]);
+    await engine.command(
+      task.id,
+      "continue",
+      { guidance: "独立验证发现遗漏，请生成 additional.txt，并保持标准不变。" },
+      "autonomous-continue-feedback",
+    );
+    await waitFor(
+      async () =>
+        (await engine.task(task.id)).verifications.length === 2 &&
+        (await engine.task(task.id)).status === "awaiting_verification",
+    );
+    result = await engine.task(task.id);
+    expect(result.verified).toBe(false);
+    expect(result.approvedPlan).toEqual(engine.plan(plan));
+    expect(
+      (await engine.readArtifact(task.id, "additional.txt")).toString(),
+    ).toContain("fixed independently");
+    expect(JSON.stringify(await engine.view(task.id))).toContain(
+      "独立验证发现遗漏",
+    );
+    await engine.command(task.id, "stop", {}, "autonomous-stop-awaiting");
+    expect((await engine.task(task.id)).status).toBe("stopped");
+    await expect(
+      engine.command(
+        task.id,
+        "plan",
+        { guidance: "删除公共检查" },
+        "autonomous-replan-frozen",
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("replans rejected initial contracts with visible feedback and prepares only the coordinator-selected workspace before freezing", async () => {
+    const { engine, faux, dir } = await fixture();
+    const selected = await mkdtemp(join(tmpdir(), "refbox-prepared-"));
+    dirs.push(selected);
+    const task = await engine.create(
+      { title: "准备工作区", goal: "做真正的实现", cwd: dir, autonomous: true },
+      "autonomous-create-prepare",
+    );
+    await engine.command(
+      task.id,
+      "prepare",
+      { cwd: selected },
+      "autonomous-prepare-path",
+    );
+    expect((await engine.task(task.id)).cwd).toBe(selected);
+    const weak = {
+      steps: "写报告",
+      criteria: "报告存在",
+      verificationCommand: "true",
+      checks: [{ id: "report", kind: "file_exists", path: "report.md" }],
+    };
+    faux.setResponses([tool("propose_plan", weak)]);
+    await engine.command(task.id, "plan", {}, "autonomous-first-proposal");
+    await waitFor(
+      async () =>
+        (await engine.task(task.id)).status === "awaiting_confirmation",
+    );
+    const stronger = {
+      steps: "实际修复",
+      criteria: "源码和测试通过",
+      verificationCommand: "test -f actual.txt",
+      checks: [{ id: "actual", kind: "file_exists", path: "actual.txt" }],
+    };
+    faux.setResponses([tool("propose_plan", stronger)]);
+    await engine.command(
+      task.id,
+      "plan",
+      { guidance: "方案只提供说明，没有实际功能，不能通过公共契约审查。" },
+      "autonomous-contract-feedback",
+    );
+    await waitFor(
+      async () =>
+        (await engine.task(task.id)).plan?.criteria === stronger.criteria,
+    );
+    expect(JSON.stringify(await engine.view(task.id))).toContain(
+      "没有实际功能",
+    );
+    faux.setResponses([
+      tool("write", { path: "actual.txt", content: "real effect" }),
+      tool("verify_result", { summary: "已实现" }),
+    ]);
+    await engine.command(
+      task.id,
+      "approve",
+      stronger,
+      "autonomous-freeze-proposal",
+    );
+    await waitFor(
+      async () =>
+        (await engine.task(task.id)).status === "awaiting_verification",
+    );
+    await expect(
+      engine.command(
+        task.id,
+        "prepare",
+        { cwd: dir },
+        "autonomous-prepare-frozen",
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(await readFile(join(selected, "actual.txt"), "utf8")).toBe(
+      "real effect",
+    );
+    await expect(readFile(join(dir, "actual.txt"))).rejects.toThrow();
+    expect(() =>
+      engine.plan({
+        ...stronger,
+        checks: [{ id: "rawshell", kind: "command", command: "rm -rf /" }],
+      }),
+    ).toThrow();
+    expect(() =>
+      engine.plan({
+        ...stronger,
+        checks: [{ id: "escape", kind: "file_exists", path: "../elsewhere" }],
+      }),
+    ).toThrow();
+  });
+
+  it("retains awaiting proof and frozen standards across real SQLite reopen without replaying admitted approval", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "refbox-autonomous-reopen-"));
+    dirs.push(dir);
+    const db = join(dir, "native.sqlite");
+    const faux = fauxProvider();
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const first = await new Engine(
+      models,
+      faux.getModel().id,
+      faux.provider.id,
+    ).open(await openNodeSqliteStorage(db));
+    const task = await first.create(
+      {
+        title: "独立验收恢复",
+        goal: "结果保留等待独立验收",
+        cwd: dir,
+        autonomous: true,
+      },
+      "autonomous-reopen-create",
+    );
+    const plan = {
+      steps: "产生文件",
+      criteria: "真正写入 result.txt",
+      verificationCommand: "test -f result.txt",
+      checks: [{ id: "result", kind: "file_exists", path: "result.txt" }],
+    };
+    await first.update(task.id, (item) => {
+      item.plan = first.plan(plan);
+      item.status = "awaiting_confirmation";
+    });
+    faux.setResponses([
+      tool("write", { path: "result.txt", content: "preserved" }),
+      tool("verify_result", { summary: "等待另一 Agent" }),
+    ]);
+    await first.command(task.id, "approve", plan, "autonomous-reopen-approve");
+    await waitFor(
+      async () =>
+        (await first.task(task.id)).status === "awaiting_verification",
+    );
+    await first.harness.commit(async (tx) => {
+      (await tx.doc(BoardDoc)).commands["autonomous-reopen-approve"].done =
+        false;
+    }, context);
+    await first.close();
+    const second = await new Engine(
+      models,
+      faux.getModel().id,
+      faux.provider.id,
+    ).open(await openNodeSqliteStorage(db));
+    engines.push(second);
+    await waitFor(
+      async () =>
+        (await second.board()).commands["autonomous-reopen-approve"].done,
+    );
+    const recovered = await second.task(task.id);
+    expect(recovered.status).toBe("awaiting_verification");
+    expect(recovered.autonomous).toBe(true);
+    expect(recovered.verified).toBe(false);
+    expect(recovered.approvedPlan).toEqual(second.plan(plan));
+    expect(recovered.verifications).toHaveLength(1);
+    expect(await readFile(join(dir, "result.txt"), "utf8")).toBe("preserved");
+    faux.setResponses([
+      tool("verify_result", { summary: "反馈恢复后仍不自封验收通过" }),
+    ]);
+    await second.command(
+      task.id,
+      "continue",
+      { guidance: "请保持既有候选并重新提交证据。" },
+      "autonomous-reopen-continue",
+    );
+    await waitFor(
+      async () =>
+        (await second.task(task.id)).verifications.length === 2 &&
+        (await second.task(task.id)).status === "awaiting_verification",
+    );
+    await second.command(
+      task.id,
+      "continue",
+      { guidance: "请保持既有候选并重新提交证据。" },
+      "autonomous-reopen-continue",
+    );
+    expect((await second.task(task.id)).verifications).toHaveLength(2);
+    expect((await second.task(task.id)).verified).toBe(false);
+  });
+});
+
 describe("Scoped platform diagnosis", () => {
   it("uses a separate native conversation and cannot execute shell, mutate plugins or leave resource scope", async () => {
     const calls: { path: string; body: Record<string, unknown> }[] = [];
     const token = "p".repeat(40);
     vi.stubGlobal("fetch", async (url: URL, options: RequestInit) => {
-      expect(new Headers(options.headers).get("authorization")).toBe("Bearer " + token);
+      expect(new Headers(options.headers).get("authorization")).toBe(
+        "Bearer " + token,
+      );
       const path = url.pathname + url.search;
       const input = options.body ? JSON.parse(String(options.body)) : {};
       if (options.method === "POST") calls.push({ path, body: input });
-      if (path === "/internal/resources") return Response.json([
-        { id: "nas", pluginId: "monitor", version: "v1", environmentId: "home" },
-        { id: "notes", pluginId: "scratchpad", version: "v1", environmentId: "home" },
-      ]);
-      if (path === "/internal/plugins") return Response.json([
-        { id: "monitor", enabled: true, manifest: { tools: [
-          { id: "read_health", mutates: false }, { id: "restart", mutates: true },
-        ] } },
-        { id: "scratchpad", enabled: true, manifest: { tools: [{ id: "read", mutates: false }] } },
-      ]);
-      if (path === "/internal/observations?resourceId=nas") return Response.json({ resourceId: "nas", healthy: false });
-      if (path === "/internal/plugins/monitor/tools/read_health") return Response.json({ resourceId: "nas", status: "unhealthy" });
+      if (path === "/internal/resources")
+        return Response.json([
+          {
+            id: "nas",
+            pluginId: "monitor",
+            version: "v1",
+            environmentId: "home",
+          },
+          {
+            id: "notes",
+            pluginId: "scratchpad",
+            version: "v1",
+            environmentId: "home",
+          },
+        ]);
+      if (path === "/internal/plugins")
+        return Response.json([
+          {
+            id: "monitor",
+            enabled: true,
+            manifest: {
+              tools: [
+                { id: "read_health", mutates: false },
+                { id: "restart", mutates: true },
+              ],
+            },
+          },
+          {
+            id: "scratchpad",
+            enabled: true,
+            manifest: { tools: [{ id: "read", mutates: false }] },
+          },
+        ]);
+      if (path === "/internal/observations?resourceId=nas")
+        return Response.json({ resourceId: "nas", healthy: false });
+      if (path === "/internal/plugins/monitor/tools/read_health")
+        return Response.json({ resourceId: "nas", status: "unhealthy" });
       return Response.json({}, { status: 404 });
     });
-      const { engine, faux, dir } = await fixture(undefined, { url: "http://127.0.0.1:8080", token });
-      const task = await engine.create({ title: "普通任务", goal: "保留原有权限模型", cwd: dir }, "task-before-diagnosis");
-      faux.setResponses([
-        tool("bash", { command: `touch '${join(dir, "unauthorized")}'` }),
-        tool("platform_call_tool", { pluginId: "monitor", toolId: "restart" }),
-        tool("platform_read_tool", { pluginId: "monitor", toolId: "restart" }),
-        tool("platform_read_tool", { pluginId: "scratchpad", toolId: "read" }),
-        tool("platform_observe", { resourceId: "notes" }),
-        tool("platform_observe", {}),
-        tool("platform_read_tool", { pluginId: "monitor", toolId: "read_health", input: { resourceId: "notes" } }),
-        fauxAssistantMessage([fauxText("NAS 检查失败；建议进一步核对服务进程，未执行修复。")]),
-      ]);
-      const input = { incidentId: "incident-nas", resourceId: "nas", version: "v1", environmentId: "home", observations: { healthy: false } };
-      const d = await engine.diagnose(input, "diagnosis-1111");
-      await waitFor(async () => (await engine.diagnosis(d.id)).status === "completed");
-      expect(d.conversationId).not.toBe(task.id);
-      expect((await engine.board()).tasks[d.conversationId]).toBeUndefined();
-      expect((await engine.task(task.id)).status).toBe("draft");
-      await expect(readFile(join(dir, "unauthorized"))).rejects.toThrow();
-      expect(calls).toHaveLength(1);
-      expect(calls[0].path).toBe("/internal/plugins/monitor/tools/read_health");
-      expect(calls[0].body).toMatchObject({ readOnly: true, resourceId: "nas", input: { resourceId: "nas" } });
-      expect(calls[0].body._idempotencyKey).toMatch(/^pi-tool:/);
-      expect((await engine.diagnosis(d.id)).summary).toContain("未执行修复");
-      expect((await engine.diagnose(input, "diagnosis-1111")).id).toBe(d.id);
-      await expect(engine.diagnose({ ...input, resourceId: "notes" }, "diagnosis-1111")).rejects.toMatchObject({ status: 409 });
-      const conversation = (await engine.harness.conversation(Number(d.conversationId) as never, context))!;
-      expect((await conversation.agent(context)).tools.map((t) => t.name)).toEqual(["platform_observe", "platform_read_tool"]);
+    const { engine, faux, dir } = await fixture(undefined, {
+      url: "http://127.0.0.1:8080",
+      token,
+    });
+    const task = await engine.create(
+      { title: "普通任务", goal: "保留原有权限模型", cwd: dir },
+      "task-before-diagnosis",
+    );
+    faux.setResponses([
+      tool("bash", { command: `touch '${join(dir, "unauthorized")}'` }),
+      tool("platform_call_tool", { pluginId: "monitor", toolId: "restart" }),
+      tool("platform_read_tool", { pluginId: "monitor", toolId: "restart" }),
+      tool("platform_read_tool", { pluginId: "scratchpad", toolId: "read" }),
+      tool("platform_observe", { resourceId: "notes" }),
+      tool("platform_observe", {}),
+      tool("platform_read_tool", {
+        pluginId: "monitor",
+        toolId: "read_health",
+        input: { resourceId: "notes" },
+      }),
+      fauxAssistantMessage([
+        fauxText("NAS 检查失败；建议进一步核对服务进程，未执行修复。"),
+      ]),
+    ]);
+    const input = {
+      incidentId: "incident-nas",
+      resourceId: "nas",
+      version: "v1",
+      environmentId: "home",
+      observations: { healthy: false },
+    };
+    const d = await engine.diagnose(input, "diagnosis-1111");
+    await waitFor(
+      async () => (await engine.diagnosis(d.id)).status === "completed",
+    );
+    expect(d.conversationId).not.toBe(task.id);
+    expect((await engine.board()).tasks[d.conversationId]).toBeUndefined();
+    expect((await engine.task(task.id)).status).toBe("draft");
+    await expect(readFile(join(dir, "unauthorized"))).rejects.toThrow();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].path).toBe("/internal/plugins/monitor/tools/read_health");
+    expect(calls[0].body).toMatchObject({
+      readOnly: true,
+      resourceId: "nas",
+      input: { resourceId: "nas" },
+    });
+    expect(calls[0].body._idempotencyKey).toMatch(/^pi-tool:/);
+    expect((await engine.diagnosis(d.id)).summary).toContain("未执行修复");
+    expect((await engine.diagnose(input, "diagnosis-1111")).id).toBe(d.id);
+    await expect(
+      engine.diagnose({ ...input, resourceId: "notes" }, "diagnosis-1111"),
+    ).rejects.toMatchObject({ status: 409 });
+    const conversation = (await engine.harness.conversation(
+      Number(d.conversationId) as never,
+      context,
+    ))!;
+    expect(
+      (await conversation.agent(context)).tools.map((t) => t.name),
+    ).toEqual(["platform_observe", "platform_read_tool"]);
   });
 
   it("preserves completed diagnosis and idempotency after SQLite reopen", async () => {
@@ -400,16 +869,38 @@ describe("Scoped platform diagnosis", () => {
     const faux = fauxProvider();
     const models = createModels();
     models.setProvider(faux.provider);
-    const first = await new Engine(models, faux.getModel().id, faux.provider.id).open(await openNodeSqliteStorage(db));
-    faux.setResponses([fauxAssistantMessage([fauxText("仅基于初始观察，证据不足。")])]);
-    const input = { incidentId: "incident-1", resourceId: "service-1", version: "v1", environmentId: "home", observations: { healthy: false } };
+    const first = await new Engine(
+      models,
+      faux.getModel().id,
+      faux.provider.id,
+    ).open(await openNodeSqliteStorage(db));
+    faux.setResponses([
+      fauxAssistantMessage([fauxText("仅基于初始观察，证据不足。")]),
+    ]);
+    const input = {
+      incidentId: "incident-1",
+      resourceId: "service-1",
+      version: "v1",
+      environmentId: "home",
+      observations: { healthy: false },
+    };
     const diagnosis = await first.diagnose(input, "persistent-diagnosis-1");
-    await waitFor(async () => (await first.diagnosis(diagnosis.id)).status === "completed");
+    await waitFor(
+      async () => (await first.diagnosis(diagnosis.id)).status === "completed",
+    );
     await first.close();
-    const second = await new Engine(models, faux.getModel().id, faux.provider.id).open(await openNodeSqliteStorage(db));
+    const second = await new Engine(
+      models,
+      faux.getModel().id,
+      faux.provider.id,
+    ).open(await openNodeSqliteStorage(db));
     engines.push(second);
-    expect((await second.diagnosis(diagnosis.id)).summary).toBe("仅基于初始观察，证据不足。");
-    expect((await second.diagnose(input, "persistent-diagnosis-1")).id).toBe(diagnosis.id);
+    expect((await second.diagnosis(diagnosis.id)).summary).toBe(
+      "仅基于初始观察，证据不足。",
+    );
+    expect((await second.diagnose(input, "persistent-diagnosis-1")).id).toBe(
+      diagnosis.id,
+    );
     expect((await second.readiness()).activeRuns).toBe(0);
     expect(Object.values((await second.board()).tasks)).toHaveLength(0);
   });

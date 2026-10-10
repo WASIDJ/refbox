@@ -242,6 +242,13 @@ func (s *Server) internalAPI(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == "GET" && r.URL.Path == "/internal/resources":
 		writeJSON(w, 200, s.platform.snapshot().Resources)
+	case r.Method == "GET" && len(parts) == 4 && parts[0] == "internal" && parts[1] == "goals" && parts[3] == "context":
+		value, err := s.goalContext(r.Context(), parts[2])
+		if err != nil {
+			jsonError(w, 503, err.Error())
+			return
+		}
+		writeJSON(w, 200, value)
 	case r.Method == "GET" && r.URL.Path == "/internal/plugins":
 		writeJSON(w, 200, s.platform.snapshot().Plugins)
 	case r.Method == "GET" && r.URL.Path == "/internal/observations":
@@ -303,6 +310,10 @@ func (s *Server) platformAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == "GET" && r.URL.Path == "/api/platform/snapshot" {
 		s.writePlatformSnapshot(w, r)
+		return
+	}
+	if r.Method == "POST" && r.URL.Path == "/api/platform/goals" {
+		s.createGoal(w, r)
 		return
 	}
 	if r.Method == "GET" && len(parts) == 4 && parts[2] == "diagnoses" {
@@ -874,6 +885,20 @@ func (s *Server) platformTaskAPI(w http.ResponseWriter, r *http.Request, parts [
 		return
 	}
 	action := parts[4]
+	if t.GoalLoop != nil && r.Method == "POST" && (action == "stop" || action == "continue" || action == "steer" || action == "plan" || action == "approve") {
+		var input map[string]any
+		if decodeBody(w, r, &input) != nil {
+			jsonError(w, 400, "invalid goal instruction")
+			return
+		}
+		updated, err := s.controlGoal(r.Context(), t, action, input)
+		if err != nil {
+			jsonError(w, 409, err.Error())
+			return
+		}
+		writeJSON(w, 200, updated)
+		return
+	}
 	if r.Method == "POST" && action == "accept" {
 		var b struct {
 			Reason string `json:"reason"`

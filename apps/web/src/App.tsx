@@ -2,6 +2,7 @@ import { useDeferredValue, useEffect, useState, type FormEvent } from "react";
 import { api, relativeTime, timestamp } from "./api";
 import { Badge, Empty, Icon, Modal, StatusTriple } from "./components";
 import TaskDetail from "./TaskDetail";
+import { goalPhases } from "./GoalProgress";
 import {
   emptySnapshot,
   type Evidence,
@@ -197,6 +198,9 @@ export default function App() {
     cwd: "",
     model: "kimi-k3",
   });
+  const [legacyMode, setLegacyMode] = useState(false),
+    [goalModel, setGoalModel] = useState(""),
+    [goalSource, setGoalSource] = useState("default");
   const [manifestUrl, setManifestUrl] = useState(""),
     [credentialEnv, setCredentialEnv] = useState("");
   const query = useDeferredValue(search).toLowerCase();
@@ -320,13 +324,38 @@ export default function App() {
   }
   async function createTask(event: FormEvent) {
     event.preventDefault();
-    const success = await perform(async () => {
-      const result = await api<Task>("/platform/tasks", newTask);
-      setSelectedTask(result.id);
-      setModal("");
-      setTab("tasks");
-    }, "任务已创建，可以让 Agent 制定计划");
-    if (success) setNewTask({ title: "", goal: "", cwd: "", model: "kimi-k3" });
+    const success = await perform(
+      async () => {
+        const result = legacyMode
+          ? await api<Task>("/platform/tasks", newTask)
+          : await api<Task>("/platform/goals", {
+              goal: newTask.goal,
+              ...(goalModel ? { model: goalModel } : {}),
+              ...(goalSource === "default"
+                ? {}
+                : { source: goalSource === "empty" ? "" : goalSource }),
+            });
+        setSnapshot((current) => ({
+          ...current,
+          tasks: [
+            ...current.tasks.filter((item) => item.id !== result.id),
+            result,
+          ],
+        }));
+        setSelectedTask(result.id);
+        setModal("");
+        setTab("tasks");
+      },
+      legacyMode
+        ? "旧版手动任务已创建"
+        : "目标已接收，正在形成方案并独立检查验收标准",
+    );
+    if (success) {
+      setNewTask({ title: "", goal: "", cwd: "", model: "kimi-k3" });
+      setLegacyMode(false);
+      setGoalModel("");
+      setGoalSource("default");
+    }
   }
   async function registerPlugin(event: FormEvent) {
     event.preventDefault();
@@ -475,6 +504,7 @@ export default function App() {
           </span>
           <button
             className="refresh-button"
+            aria-label="刷新"
             onClick={() => void perform(refresh, "状态已刷新")}
             disabled={pending}
           >
@@ -507,7 +537,15 @@ export default function App() {
             </p>
           </div>
           {tab === "tasks" && (
-            <button className="primary" onClick={() => setModal("task")}>
+            <button
+              className="primary"
+              onClick={() => {
+                setLegacyMode(false);
+                setGoalModel("");
+                setGoalSource("default");
+                setModal("task");
+              }}
+            >
               <Icon name="plus" />
               新建目标
             </button>
@@ -571,8 +609,12 @@ export default function App() {
                 <span>持续运行</span>
                 <strong>
                   {
-                    snapshot.tasks.filter(
-                      (item) => item.executionStatus === "running",
+                    snapshot.tasks.filter((item) =>
+                      item.goalLoop
+                        ? !["completed", "blocked", "paused"].includes(
+                            item.goalLoop.phase,
+                          )
+                        : item.executionStatus === "running",
                     ).length
                   }
                   <small>个任务</small>
@@ -801,6 +843,18 @@ export default function App() {
                       >
                         <h3>{item.title}</h3>
                         <p>{item.goal}</p>
+                        {item.goalLoop && (
+                          <div className="goal-card-progress">
+                            <Badge
+                              state={item.goalLoop.phase}
+                              text={goalPhases[item.goalLoop.phase]}
+                            />
+                            <span className="muted">
+                              {item.goalLoop.rounds} / {item.goalLoop.maxRounds}{" "}
+                              轮
+                            </span>
+                          </div>
+                        )}
                         <StatusTriple
                           business={item.businessStatus}
                           execution={item.executionStatus}
@@ -1170,61 +1224,118 @@ export default function App() {
             </p>
           )}
           {modal === "task" ? (
-            <form onSubmit={createTask}>
+            <form onSubmit={createTask} className="goal-create-form">
               <label>
-                目标名称
-                <input
-                  autoFocus
-                  value={newTask.title}
-                  onChange={(event) =>
-                    setNewTask({ ...newTask, title: event.target.value })
-                  }
-                  required
-                  maxLength={200}
-                />
-              </label>
-              <label>
-                目标与背景
+                {legacyMode ? "目标与背景" : "你想完成什么？"}
                 <textarea
+                  autoFocus
                   value={newTask.goal}
                   onChange={(event) =>
                     setNewTask({ ...newTask, goal: event.target.value })
                   }
                   required
+                  rows={5}
+                  placeholder="例如：找出当前工作台最影响日常使用的问题，完成改进，并用实际界面和测试证明效果。"
                 />
               </label>
-              <label>
-                工作目录
-                <input
-                  value={newTask.cwd}
-                  onChange={(event) =>
-                    setNewTask({ ...newTask, cwd: event.target.value })
-                  }
-                  placeholder="/绝对路径/项目目录"
-                  required
-                />
-              </label>
-              <label>
-                模型
-                <select
-                  value={newTask.model}
-                  onChange={(event) =>
-                    setNewTask({ ...newTask, model: event.target.value })
-                  }
-                >
-                  {!models.some((model) => model.id === "kimi-k3") && (
-                    <option value="kimi-k3">kimi-k3</option>
-                  )}
-                  {models.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <p className="muted">创建后制定计划，确认标准后开始实际执行。</p>
+              {!legacyMode && (
+                <p className="muted">
+                  Agent
+                  形成方案，独立验证者检查验收标准；有缺陷就继续改进，通过后保留成果和证明。
+                </p>
+              )}
+              <details className="goal-advanced">
+                <summary>高级设置</summary>
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={legacyMode}
+                    onChange={(event) => setLegacyMode(event.target.checked)}
+                  />
+                  创建旧版手动任务
+                </label>
+                {legacyMode ? (
+                  <>
+                    <p className="muted">
+                      兼容旧任务：手动设置目录、确认执行计划和记录人工验收。
+                    </p>
+                    <label>
+                      目标名称
+                      <input
+                        value={newTask.title}
+                        onChange={(event) =>
+                          setNewTask({ ...newTask, title: event.target.value })
+                        }
+                        required
+                        maxLength={200}
+                      />
+                    </label>
+                    <label>
+                      工作目录
+                      <input
+                        value={newTask.cwd}
+                        onChange={(event) =>
+                          setNewTask({ ...newTask, cwd: event.target.value })
+                        }
+                        placeholder="/绝对路径/项目目录"
+                        required
+                      />
+                    </label>
+                    <label>
+                      模型
+                      <select
+                        value={newTask.model}
+                        onChange={(event) =>
+                          setNewTask({ ...newTask, model: event.target.value })
+                        }
+                      >
+                        {!models.some((model) => model.id === "kimi-k3") && (
+                          <option value="kimi-k3">kimi-k3</option>
+                        )}
+                        {models.map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </>
+                ) : (
+                  <>
+                    <label>
+                      任务上下文
+                      <select
+                        value={goalSource}
+                        onChange={(event) => setGoalSource(event.target.value)}
+                      >
+                        <option value="default">使用默认项目</option>
+                        <option value="refbox">Refbox 项目</option>
+                        <option value="empty">独立空白工作区</option>
+                      </select>
+                    </label>
+                    <label>
+                      模型（可选）
+                      <select
+                        value={goalModel}
+                        onChange={(event) => setGoalModel(event.target.value)}
+                      >
+                        <option value="">使用默认模型</option>
+                        {models.map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </>
+                )}
+              </details>
               <button className="primary" disabled={pending}>
-                {pending ? "正在创建…" : "创建目标"}
+                {pending
+                  ? "正在提交…"
+                  : legacyMode
+                    ? "创建手动任务"
+                    : "开始推进"}
               </button>
             </form>
           ) : (

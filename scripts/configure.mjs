@@ -68,6 +68,11 @@ const values = {
   REFBOX_AUTO_REPAIR: "true",
   REFBOX_ALLOW_TUNNEL_RESTART: "false",
   REFBOX_ENVIRONMENT_ID: "macmini-local",
+  REFBOX_GOAL_SOURCE_REPOSITORY: root,
+	REFBOX_GOAL_SHARED_DEPENDENCIES_ROOT: root,
+  REFBOX_GOAL_WORKSPACE_ROOT: resolve(root, "var/workspaces/goals"),
+  REFBOX_GOAL_MODEL: "kimi-k3",
+  REFBOX_WIKI_DIR: "/Users/ryou/workspace/NOTE/03-Resources/wiki",
   REFBOX_PUBLIC_URL: "",
   REFBOX_VERIFY_PASSWORD: password,
   REFBOX_PLUGIN_MANIFESTS: JSON.stringify([

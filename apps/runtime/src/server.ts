@@ -7,7 +7,7 @@ import { timingSafeEqual } from "node:crypto";
 import type { Engine } from "./engine.js";
 import { HttpError, required } from "./state.js";
 
-async function body(req: IncomingMessage): Promise<Record<string, string>> {
+async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
   let text = "";
   for await (const chunk of req) {
     text += chunk;

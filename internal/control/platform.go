@@ -133,21 +133,22 @@ type Evidence struct {
 	Review               string            `json:"review"`
 }
 type PlatformTask struct {
-	ID                 string `json:"id"`
-	ConversationID     string `json:"conversationId"`
-	Title              string `json:"title"`
-	Goal               string `json:"goal"`
-	Cwd                string `json:"cwd"`
-	Model              string `json:"model"`
-	BusinessStatus     string `json:"businessStatus"`
-	ExecutionStatus    string `json:"executionStatus"`
-	VerificationStatus string `json:"verificationStatus"`
-	CreatedAt          string `json:"createdAt"`
-	UpdatedAt          string `json:"updatedAt"`
-	LegacyVerified     bool   `json:"legacyVerified"`
-	EngineAvailable    bool   `json:"engineAvailable"`
-	ManualReason       string `json:"manualReason,omitempty"`
-	AcceptedAt         string `json:"acceptedAt,omitempty"`
+	GoalLoop           *GoalLoop `json:"goalLoop,omitempty"`
+	ID                 string    `json:"id"`
+	ConversationID     string    `json:"conversationId"`
+	Title              string    `json:"title"`
+	Goal               string    `json:"goal"`
+	Cwd                string    `json:"cwd"`
+	Model              string    `json:"model"`
+	BusinessStatus     string    `json:"businessStatus"`
+	ExecutionStatus    string    `json:"executionStatus"`
+	VerificationStatus string    `json:"verificationStatus"`
+	CreatedAt          string    `json:"createdAt"`
+	UpdatedAt          string    `json:"updatedAt"`
+	LegacyVerified     bool      `json:"legacyVerified"`
+	EngineAvailable    bool      `json:"engineAvailable"`
+	ManualReason       string    `json:"manualReason,omitempty"`
+	AcceptedAt         string    `json:"acceptedAt,omitempty"`
 }
 type Worker struct {
 	ID       string `json:"id"`
@@ -175,6 +176,8 @@ type Observation struct {
 	Unavailable   bool   `json:"unavailable,omitempty"`
 }
 type platformState struct {
+	GoalRequests    map[string]*GoalRequest  `json:"goalRequests,omitempty"`
+	GoalRequestKeys map[string]string        `json:"goalRequestKeys,omitempty"`
 	Schema          int                      `json:"schema"`
 	Plugins         map[string]*Plugin       `json:"plugins"`
 	Credentials     map[string]string        `json:"credentials"`
@@ -555,10 +558,21 @@ func (p *Platform) task(id string) (*PlatformTask, error) {
 		return nil, errors.New("task does not exist")
 	}
 	out := *t
+	if t.GoalLoop != nil {
+		raw, _ := json.Marshal(t)
+		_ = json.Unmarshal(raw, &out)
+	}
 	return &out, nil
 }
 
 type nativeTask struct {
+	Plan         *GoalPlan `json:"plan,omitempty"`
+	ApprovedPlan *GoalPlan `json:"approvedPlan,omitempty"`
+	Autonomous   bool      `json:"autonomous,omitempty"`
+	Reason       string    `json:"reason,omitempty"`
+	Experiments  []struct {
+		Artifacts []string `json:"artifacts"`
+	} `json:"experiments,omitempty"`
 	ID        string `json:"id"`
 	Title     string `json:"title"`
 	Goal      string `json:"goal"`
@@ -593,7 +607,7 @@ func (p *Platform) syncTasks(tasks []nativeTask, available bool) error {
 			t.Model = n.Model
 			previousExecution := t.ExecutionStatus
 			t.ExecutionStatus = n.Status
-			if previousExecution != n.Status && t.BusinessStatus == "active" && (n.Status == "blocked" || n.Status == "awaiting_confirmation" || (n.Status == "completed" && t.VerificationStatus != "pass" && t.VerificationStatus != "manual")) {
+			if t.GoalLoop == nil && previousExecution != n.Status && t.BusinessStatus == "active" && (n.Status == "blocked" || n.Status == "awaiting_confirmation" || (n.Status == "completed" && t.VerificationStatus != "pass" && t.VerificationStatus != "manual")) {
 				t.BusinessStatus = "attention"
 			}
 			t.CreatedAt = n.CreatedAt
@@ -639,6 +653,9 @@ func (p *Platform) acceptTask(id, reason string) error {
 		t := p.state.Tasks[id]
 		if t == nil {
 			return errors.New("unknown task")
+		}
+		if t.GoalLoop != nil {
+			return errors.New("自主目标需要独立验收；人工结束不能代替验证")
 		}
 		t.VerificationStatus = "manual"
 		t.BusinessStatus = "done"
@@ -835,6 +852,11 @@ func (s *Server) PlatformLoop(ctx context.Context) {
 		s.synchronize(ctx)
 		s.discover(ctx)
 		s.pollDiagnoses(ctx)
+		for _, task := range s.platform.snapshot().Tasks {
+			if task.GoalLoop != nil && task.EngineAvailable {
+				go s.advanceGoal(ctx, task.ID)
+			}
+		}
 		for _, plugin := range s.platform.snapshot().Plugins {
 			if plugin.Enabled && plugin.Online && len(plugin.Manifest.Events) > 0 {
 				if _, loaded := s.platform.operations.LoadOrStore("events:"+plugin.ID, true); !loaded {

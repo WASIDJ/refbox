@@ -3,6 +3,51 @@ export type Plan = {
   criteria: string;
   verificationCommand: string;
 };
+export type GoalCheck = {
+  id: string;
+  kind: "file_exists" | "file_contains" | "json_equals" | "command";
+  path?: string;
+  contains?: string;
+  jsonPath?: string;
+  equals?: unknown;
+  command?: "tests" | "build" | "ui" | "diff";
+};
+export type GoalContract = {
+  version: 1;
+  goal: string;
+  criteria: string;
+  checks: GoalCheck[];
+  definitionJson: string;
+  hash: string;
+  reviewConversationId: string;
+  reviewedAt: string;
+  summary: string;
+};
+export type GoalReview = {
+  at: string;
+  verdict: "pass" | "fail" | "inconclusive";
+  summary: string;
+  reviewConversationId: string;
+  contractHash: string;
+  candidateId?: string;
+  checks?: unknown[];
+  evidence?: unknown;
+};
+export type GoalLoop = {
+  phase:
+    | "planning"
+    | "contract_review"
+    | "executing"
+    | "verifying"
+    | "completed"
+    | "blocked"
+    | "paused";
+  rounds: number;
+  maxRounds: number;
+  reason: string;
+  contract?: GoalContract;
+  reviews: GoalReview[];
+};
 export type LegacyTask = {
   id: string;
   title: string;
@@ -47,6 +92,7 @@ export type Task = {
   engineAvailable: boolean;
   manualReason?: string;
   acceptedAt?: string;
+  goalLoop?: GoalLoop;
 };
 export type View = {
   entries: {
