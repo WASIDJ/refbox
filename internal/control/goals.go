@@ -204,6 +204,61 @@ func validateGoalContract(c *GoalContract, goal string, plan *GoalPlan) error {
 	}
 	return nil
 }
+// validGoalProof enforces that an independent pass verdict is bound to the
+// exact task, round, frozen contract and candidate, that every fixed contract
+// check is present with an independently observed passed=true result, and that
+// real non-null evidence was collected. Anything weaker can never close the
+// goal; the same candidate stays available for an independent retry.
+func validGoalProof(proof *GoalReview, taskID string, rounds int, contractHash string, contractChecks []GoalCheck) error {
+	if proof.TaskID != taskID || proof.Round != rounds || proof.ContractHash != contractHash {
+		return errors.New("独立证据缺少匹配的任务、轮次或方案")
+	}
+	if proof.Verdict != "pass" {
+		return nil
+	}
+	if proof.CandidateID == "" || proof.ReviewConversationID == "" {
+		return errors.New("独立证据缺少匹配的任务、轮次、方案或候选版本")
+	}
+	if len(proof.Evidence) == 0 || bytes.Equal(bytes.TrimSpace(proof.Evidence), []byte("null")) {
+		return errors.New("独立证据缺少真实的结果证据")
+	}
+	if len(proof.Checks) != len(contractChecks) {
+		return errors.New("独立证据缺少固定验收项的完整结果")
+	}
+	expected := map[string]int{}
+	for _, check := range contractChecks {
+		expected[check.ID]++
+	}
+	var observed struct {
+		ID     string          `json:"id"`
+		Kind   string          `json:"kind"`
+		Passed json.RawMessage `json:"passed"`
+	}
+	for _, raw := range proof.Checks {
+		observed = struct {
+			ID     string          `json:"id"`
+			Kind   string          `json:"kind"`
+			Passed json.RawMessage `json:"passed"`
+		}{}
+		if err := json.Unmarshal(raw, &observed); err != nil {
+			return errors.New("独立验收结果无法解析")
+		}
+		if expected[observed.ID] == 0 {
+			return errors.New("独立验收结果与固定验收项不匹配")
+		}
+		expected[observed.ID]--
+		if !bytes.Equal(bytes.TrimSpace(observed.Passed), []byte("true")) {
+			return errors.New("固定验收项未独立通过，不能把目标标记完成")
+		}
+	}
+	for _, remaining := range expected {
+		if remaining != 0 {
+			return errors.New("独立验收结果与固定验收项不匹配")
+		}
+	}
+	return nil
+}
+
 func (s *Server) updateGoal(id string, fn func(*PlatformTask, *GoalLoop) error) error {
 	return s.platform.mutate(func() error {
 		t := s.platform.state.Tasks[id]
@@ -405,9 +460,9 @@ func (s *Server) advanceGoal(ctx context.Context, id string) {
 			s.deferGoal(id, g.Phase, err.Error())
 			return
 		}
-		if proof.TaskID != id || proof.Round != g.Rounds || proof.ContractHash != g.Contract.Hash || proof.Verdict == "pass" && (proof.CandidateID == "" || proof.ReviewConversationID == "" || len(proof.Checks) != len(g.Contract.Checks) || len(proof.Evidence) == 0) {
+		if err := validGoalProof(&proof, id, g.Rounds, g.Contract.Hash, g.Contract.Checks); err != nil {
 			proof.Verdict = "inconclusive"
-			proof.Summary = "独立证据缺少匹配的任务、轮次、方案或候选版本"
+			proof.Summary = err.Error()
 		}
 		fresh, e := s.goalNative(ctx, t)
 		if e != nil || fresh.Status != "awaiting_verification" || fresh.UpdatedAt != n.UpdatedAt {
