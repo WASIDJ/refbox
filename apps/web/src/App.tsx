@@ -67,8 +67,20 @@ function EvidenceCard({ evidence }: { evidence: Evidence }) {
             <p className="muted break-word">
               {check.url} · {timestamp(check.sampledAt)}
             </p>
+            {check.witness && (
+              <details>
+                <summary>原始采样证据</summary>
+                <pre>{JSON.stringify(check.witness, null, 2)}</pre>
+              </details>
+            )}
           </div>
         ))}
+        {evidence.monitorSeries && (
+          <details>
+            <summary>连续健康采样</summary>
+            <pre>{JSON.stringify(evidence.monitorSeries, null, 2)}</pre>
+          </details>
+        )}
         {evidence.review && <pre>{evidence.review}</pre>}
       </details>
     </article>

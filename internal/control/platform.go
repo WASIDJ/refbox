@@ -118,6 +118,7 @@ type Incident struct {
 	DiagnosisSummary string `json:"diagnosisSummary,omitempty"`
 }
 type Evidence struct {
+	MonitorSeries        json.RawMessage   `json:"monitorSeries,omitempty"`
 	ID                   string            `json:"id"`
 	IncidentID           string            `json:"incidentId"`
 	ResourceID           string            `json:"resourceId"`
@@ -855,7 +856,7 @@ func (s *Server) PlatformLoop(ctx context.Context) {
 			if s.config.AutoRepair && i.Status == "diagnosing" && r.RestartAllowed && r.Failures >= 2 {
 				go func(id string) { _ = s.repair(ctx, id) }(i.ID)
 			}
-			if r.Health == "healthy" && r.HealthySamples >= 3 && i.Status == "proving" {
+			if r.Health == "healthy" && r.HealthySamples >= 3 && (i.Status == "proving" || i.Status == "diagnosing") {
 				go func(id string) { _ = s.verify(ctx, id) }(i.ID)
 			}
 		}

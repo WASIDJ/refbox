@@ -33,6 +33,7 @@ export function monitorManifest({
   publicUrl = "",
   environmentId = "macmini-local",
   resourceVersion = "2",
+  allowTunnelRestart = false,
 } = {}) {
   const deployed = publicUrl
     ? [
@@ -139,7 +140,7 @@ export function monitorManifest({
           },
           ...deployed,
         ],
-        true,
+        allowTunnelRestart === true,
       ),
     ],
     tools: [
@@ -417,6 +418,7 @@ if (
     tunnelMetricsUrl: process.env.REFBOX_TUNNEL_METRICS_URL,
     publicUrl: process.env.REFBOX_PUBLIC_URL ?? "",
     environmentId: process.env.REFBOX_ENVIRONMENT_ID ?? "macmini-local",
+    allowTunnelRestart: process.env.REFBOX_ALLOW_TUNNEL_RESTART === "true",
     env: process.env,
   });
   await listen(service.server, port);

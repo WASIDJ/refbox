@@ -1,7 +1,54 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MonitorCollector } from "../monitor.mjs";
+import { MonitorCollector, monitorManifest } from "../monitor.mjs";
 import { httpProbe } from "../lib/probes.mjs";
+
+test("default public-route monitoring never authorizes restarting a healthy Cloudflare connector", () => {
+  const manifest = monitorManifest({
+    publicUrl: "https://refbox.example.test",
+  });
+  const resources = Object.fromEntries(
+    manifest.resources.map((resource) => [resource.id, resource]),
+  );
+  assert.equal(resources["refbox-engine"].restartAllowed, true);
+  assert.equal(resources["refbox-control"].restartAllowed, false);
+  assert.equal(resources.macmini.restartAllowed, false);
+  assert.equal(resources["refbox-tunnel"].restartAllowed, false);
+  assert.ok(
+    resources["refbox-tunnel"].checks.some(
+      (check) => check.metric?.name === "cloudflared_tunnel_ha_connections",
+    ),
+  );
+  assert.ok(
+    resources["refbox-tunnel"].checks.some(
+      (check) => check.id === "deployed-control",
+    ),
+  );
+  assert.ok(
+    resources["refbox-tunnel"].checks.some(
+      (check) => check.id === "deployed-ui" && check.browser,
+    ),
+  );
+});
+
+test("Cloudflare connector restart requires an explicit boolean opt-in and cannot change other resource permissions", () => {
+  for (const allowTunnelRestart of [undefined, false, "false", "true", 1]) {
+    assert.equal(
+      monitorManifest({ allowTunnelRestart }).resources.find(
+        (resource) => resource.id === "refbox-tunnel",
+      ).restartAllowed,
+      false,
+    );
+  }
+  const manifest = monitorManifest({ allowTunnelRestart: true });
+  const resources = Object.fromEntries(
+    manifest.resources.map((resource) => [resource.id, resource]),
+  );
+  assert.equal(resources["refbox-tunnel"].restartAllowed, true);
+  assert.equal(resources["refbox-engine"].restartAllowed, true);
+  assert.equal(resources["refbox-control"].restartAllowed, false);
+  assert.equal(resources.macmini.restartAllowed, false);
+});
 
 test("missing probe credentials and rejected authentication remain unknown, without claiming service failure", async (t) => {
   const check = {

@@ -505,6 +505,65 @@ func TestUnavailableProbeDoesNotAuthorizeRestart(t *testing.T) {
 	}
 }
 
+func TestRecoveredServiceAutomaticallyProvesAfterTransientRestartFailures(t *testing.T) {
+	p, m := platformFixture(t)
+	s, e := New(configForTest("http://127.0.0.1:18801"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	s.platform.Close()
+	s.platform = p
+	s.config.VerifierURL = "http://127.0.0.1:18812"
+	s.config.VerifierToken = strings.Repeat("v", 40)
+	s.client.Transport = unavailableTransport{}
+	s.manifestClient.Transport = handlerTransport{http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, m) })}
+	s.serviceClient.Transport = handlerTransport{http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&input)
+		resource, _ := p.resource("engine")
+		result := passing(resource)
+		result.IncidentID = input["incidentId"].(string)
+		result.ResourceID = resource.ID
+		result.ActionID = input["actionId"].(string)
+		result.Version = resource.Version
+		result.EnvironmentID = resource.EnvironmentID
+		writeJSON(w, 200, result)
+	})}
+	id := opened(t, p)
+	action, _, e := p.reserveAction(id)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = p.actionResult(id, action.ActionID, nil); e != nil {
+		t.Fatal(e)
+	}
+	sample(t, p, false)
+	sample(t, p, false)
+	before, _ := p.incident(id)
+	if before.Status != "diagnosing" {
+		t.Fatal("restart transient did not return to diagnosis")
+	}
+	for range 3 {
+		sample(t, p, true)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { s.PlatformLoop(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		i, _ := p.incident(id)
+		if i.Status == "closed" {
+			if i.Attempts != 1 || i.Verification != "pass" {
+				t.Fatal("recovery repeated action or skipped proof")
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("three fresh samples did not trigger independent proof after transient restart failures")
+}
+
 func TestPluginGetToolAndProxyStripAdminSession(t *testing.T) {
 	p, m := platformFixture(t)
 	m.Tools = []Tool{{ID: "samples", Path: "/samples", Method: "GET"}}

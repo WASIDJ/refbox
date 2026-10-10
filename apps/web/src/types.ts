@@ -129,6 +129,7 @@ export type Incident = {
   diagnosisSummary?: string;
 };
 export type Evidence = {
+  monitorSeries?: Record<string, unknown>;
   id: string;
   incidentId: string;
   resourceId: string;
@@ -144,6 +145,7 @@ export type Evidence = {
     passed: boolean;
     detail: string;
     sampledAt: string;
+    witness?: Record<string, unknown>;
   }[];
   reviewConversationId: string;
   review: string;

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import {
   createModels,
   fauxProvider,
@@ -100,7 +101,270 @@ test("Prometheus connector check requires live connections rather than just a me
   };
   assert.equal((await httpProbe(check)).passed, false);
   connections = 2;
-  assert.equal((await httpProbe(check)).passed, true);
+  const connected = await httpProbe(check);
+  assert.equal(connected.passed, true);
+  assert.deepEqual(connected.witness.assertions[0].values, [2]);
+  assert.equal(connected.witness.assertions[0].sum, 2);
+});
+
+test("real TCP HTTP witnesses preserve response status, raw body hash and observed JSON with bounded excerpts", async (t) => {
+  const raw = JSON.stringify({
+    result: "ready",
+    description: "采样".repeat(2000),
+  });
+  const server = serviceServer((req, res) => {
+    assert.equal(req.headers.authorization, "Bearer " + token);
+    res.writeHead(req.url === "/failed" ? 503 : 200);
+    res.end(raw);
+  });
+  const url = await listen(server);
+  t.after(() => closeServer(server));
+  const check = {
+    id: "raw",
+    url,
+    json: { path: "result", equals: "ready" },
+    credentialEnv: "TEST_TOKEN",
+  };
+  const probe = await httpProbe(check, { env: { TEST_TOKEN: token } });
+  assert.equal(probe.passed, true);
+  assert.equal(probe.witness.status, 200);
+  assert.equal(probe.witness.bodyBytes, Buffer.byteLength(raw));
+  assert.equal(
+    probe.witness.bodySha256,
+    createHash("sha256").update(raw).digest("hex"),
+  );
+  assert.equal(probe.witness.bodyTruncated, true);
+  assert.ok(Buffer.byteLength(probe.witness.bodyExcerpt) <= 4096);
+  assert.ok(raw.startsWith(probe.witness.bodyExcerpt));
+  assert.deepEqual(probe.witness.assertions[0].observed, {
+    present: true,
+    value: "ready",
+  });
+  assert.doesNotMatch(JSON.stringify(probe), new RegExp(token));
+  const failed = await httpProbe(
+    { ...check, url: url + "/failed" },
+    { env: { TEST_TOKEN: token } },
+  );
+  assert.equal(failed.passed, false);
+  assert.equal(failed.witness.status, 503);
+  assert.equal(failed.witness.bodySha256, probe.witness.bodySha256);
+});
+
+test("oversized 401 and 403 response bodies preserve unavailable authentication without claiming a repairable failure", async (t) => {
+  const server = serviceServer((req, res) => {
+    res.writeHead(req.url === "/401" ? 401 : 403);
+    res.end("x".repeat(1024 * 1024 + 1));
+  });
+  const url = await listen(server);
+  t.after(() => closeServer(server));
+  for (const status of [401, 403]) {
+    const result = await httpProbe({
+      id: "auth",
+      url: url + "/" + status,
+      contains: "ready",
+    });
+    assert.equal(result.passed, false);
+    assert.equal(result.unavailable, true);
+    assert.equal(result.witness.status, status);
+    assert.match(result.detail, /Response exceeds 1 MiB evidence limit/);
+  }
+});
+
+test("deployed prover fetches authoritative recent observations and gives separate Pi conversations raw TCP evidence", async (t) => {
+  const dir = await temporary(t);
+  const fixture = createFaultFixture({ token, mode: "healthy" });
+  const fixtureUrl = await listen(fixture.server);
+  t.after(() => fixture.close());
+  const resource = {
+    id: "business",
+    version: "v1",
+    environmentId: "test",
+    health: "healthy",
+    sampledAt: now(),
+    healthySamples: 10,
+    checks: [
+      {
+        id: "business",
+        url: fixtureUrl + "/business",
+        json: { path: "result", equals: "ready" },
+      },
+    ],
+  };
+  const history = [32000, 17000, 2000].map((age) => ({
+    resourceId: resource.id,
+    version: resource.version,
+    environmentId: resource.environmentId,
+    sampledAt: new Date(Date.now() - age).toISOString(),
+    healthy: true,
+    method: "http_json",
+    detail: "business: Registered business assertion passed.",
+  }));
+  const platformToken = "independent-platform-token-".repeat(3);
+  let historyReads = 0;
+  const platform = serviceServer((req, res) => {
+    assert.equal(req.headers.authorization, "Bearer " + platformToken);
+    if (req.url === "/internal/resources") return json(res, 200, [resource]);
+    if (req.url === "/internal/observations?resourceId=business") {
+      historyReads++;
+      return json(res, 200, { resource, observations: history });
+    }
+    throw new Error("Unexpected platform request: " + req.url);
+  });
+  const platformUrl = await listen(platform);
+  t.after(() => closeServer(platform));
+  const faux = fauxProvider();
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const reviewer = await PiReviewer.open({
+    database: join(dir, "raw-evidence.sqlite"),
+    models,
+    model: faux.getModel().id,
+    provider: faux.provider.id,
+  });
+  const originalReview = reviewer.review.bind(reviewer);
+  const payloads = [];
+  reviewer.review = async (evidence) => {
+    payloads.push(evidence);
+    assert.equal(evidence.healthySamples, 10);
+    assert.equal(evidence.monitorSeries.providedSampleCount, 3);
+    assert.deepEqual(evidence.monitorSeries.observations, history);
+    assert.ok(
+      evidence.monitorSeries.observations.every(
+        (item) => Date.parse(item.sampledAt) < Date.parse(evidence.requestedAt),
+      ),
+    );
+    assert.equal(evidence.checks[0].witness.status, 200);
+    assert.equal(
+      JSON.parse(evidence.checks[0].witness.bodyExcerpt).result,
+      "ready",
+    );
+    assert.equal(
+      evidence.checks[0].witness.assertions[0].observed.value,
+      "ready",
+    );
+    return originalReview(evidence);
+  };
+  faux.setResponses(
+    Array.from({ length: 2 }, () => (transcript) => {
+      assert.equal((transcript.tools ?? []).length, 0);
+      return fauxAssistantMessage([
+        fauxText(
+          '{"approved":true,"summary":"原始响应与三次独立健康记录覆盖固定标准。"}',
+        ),
+      ]);
+    }),
+  );
+  const service = createProverService({
+    token,
+    platformUrl,
+    platformToken,
+    reviewer,
+  });
+  const url = await listen(service.server);
+  t.after(() => service.close());
+  const call = () =>
+    fetch(url + "/verify", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify(requestFor(resource)),
+    }).then((response) => response.json());
+  const first = await call();
+  const second = await call();
+  assert.equal(first.verdict, "pass");
+  assert.equal(second.verdict, "pass");
+  assert.notEqual(first.reviewConversationId, second.reviewConversationId);
+  assert.equal(historyReads, 2);
+  assert.equal(payloads.length, 2);
+  history[1].healthy = false;
+  const contradicted = await call();
+  assert.equal(contradicted.verdict, "inconclusive");
+  assert.equal(
+    payloads.length,
+    2,
+    "a contradictory history must never reach model approval",
+  );
+});
+
+test("fresh healthy counters cannot replace actual consecutive version-bound observation records", async (t) => {
+  const fixture = createFaultFixture({ token, mode: "healthy" });
+  const url = await listen(fixture.server);
+  t.after(() => fixture.close());
+  const resource = {
+    id: "business",
+    version: "v1",
+    environmentId: "test",
+    health: "healthy",
+    sampledAt: now(),
+    healthySamples: 10,
+    checks: [
+      {
+        id: "business",
+        url: url + "/business",
+        json: { path: "result", equals: "ready" },
+      },
+    ],
+  };
+  const samples = [32000, 17000, 2000].map((age) => ({
+    resourceId: resource.id,
+    version: resource.version,
+    environmentId: resource.environmentId,
+    sampledAt: new Date(Date.now() - age).toISOString(),
+    healthy: true,
+    method: "http_json",
+  }));
+  let reviewed = 0;
+  const options = {
+    resources: async () => [resource],
+    observations: async () => samples,
+    reviewer: {
+      review: async () => {
+        reviewed++;
+        return affirmative.review();
+      },
+    },
+  };
+  const original = structuredClone(samples);
+  const mutations = [
+    () => samples.splice(0, 1),
+    () => {
+      samples[1].unavailable = true;
+    },
+    () => {
+      samples[1].healthy = false;
+    },
+    () => {
+      samples[1].version = "old";
+    },
+    () => {
+      samples[1].environmentId = "other";
+    },
+    () => {
+      samples[0].sampledAt = new Date(Date.now() - 60000).toISOString();
+    },
+    () => {
+      samples[2].sampledAt = samples[1].sampledAt;
+    },
+    () => {
+      samples[2].sampledAt = "invalid";
+    },
+  ];
+  for (const mutate of mutations) {
+    samples.splice(0, samples.length, ...structuredClone(original));
+    mutate();
+    assert.equal(
+      (await prove(requestFor(resource), options)).verdict,
+      "inconclusive",
+    );
+  }
+  assert.equal(reviewed, 0);
+  options.observations = async () => {
+    throw new Error("platform down");
+  };
+  assert.equal(
+    (await prove(requestFor(resource), options)).verdict,
+    "inconclusive",
+  );
+  assert.equal(reviewed, 0);
 });
 
 test("scratchpad plugin persists independent business data across restart and deduplicates writes", async (t) => {

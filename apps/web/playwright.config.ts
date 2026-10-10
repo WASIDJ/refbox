@@ -6,6 +6,9 @@ export default defineConfig({
   use: {
     baseURL: process.env.REFBOX_TEST_URL ?? "https://refbox.test",
     headless: true,
+    // Exercise the real Chromium browser, including GPU/iframe rendering.
+    // The separate macOS headless-shell build currently crashes its GPU helper.
+    channel: "chromium",
   },
   workers: 1,
 });

@@ -173,6 +173,12 @@ const initial = {
           passed: false,
           detail: "界面未呈现工作台",
           sampledAt: now,
+          witness: {
+            navigationStatus: 200,
+            visible: false,
+            finalUrl: "https://refbox.example.test",
+            selector: "main",
+          },
         },
       ],
       reviewConversationId: "review-7",
@@ -221,7 +227,7 @@ async function installMock(page: Page): Promise<Mock> {
           ? "text/javascript"
           : extname(file) === ".css"
             ? "text/css"
-            : "text/html";
+            : "text/html; charset=utf-8";
       return route.fulfill({ contentType: type, body: await readFile(file) });
     }
     if (path === "/api/session") return json({ authenticated });
@@ -247,7 +253,7 @@ async function installMock(page: Page): Promise<Mock> {
       });
     if (path.endsWith("/proxy/workspace"))
       return route.fulfill({
-        contentType: "text/html",
+        contentType: "text/html; charset=utf-8",
         body: "<!doctype html><html lang='zh-CN'><body><h1>个人便笺服务</h1><p>业务数据由独立服务保留。</p></body></html>",
       });
     if (request.method() === "POST") {
@@ -396,6 +402,10 @@ test("freshness, independent evidence and two-restart limit stay distinct", asyn
   await dialog.getByText("查看检查与溯源").click();
   await expect(dialog.getByText("界面未呈现工作台")).toBeVisible();
   await expect(dialog.getByText("review-7")).toBeVisible();
+  await dialog.getByText("原始采样证据", { exact: true }).click();
+  await expect(
+    dialog.locator("pre").filter({ hasText: '"navigationStatus": 200' }),
+  ).toBeVisible();
   await dialog.getByRole("button", { name: "重新验证" }).click();
   await expect(
     dialog.getByText("三个健康样本及实际用户路径检查通过"),
@@ -419,7 +429,7 @@ test("business status errors surface and human acceptance preserves the proof di
   );
   await dialog.getByLabel("任务状态").selectOption("active");
   await dialog.getByRole("button", { name: "保存状态" }).click();
-  await expect(dialog.getByText("进行中", { exact: true })).toBeVisible();
+  await expect(dialog.locator(".badge.state-active")).toHaveText("进行中");
   await dialog.getByRole("button", { name: "继续已批准的任务" }).click();
   await expect(
     dialog.getByRole("button", { name: "停止当前执行" }),
