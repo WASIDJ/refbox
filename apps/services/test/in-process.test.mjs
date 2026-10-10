@@ -341,6 +341,111 @@ test("in-process proof endpoint refuses replaced criteria, missing model, stale 
   );
 });
 
+test("independent proof accepts only an entire JSON fence and retains every assertion and evidence gate", async (t) => {
+  const transport = new InProcessTransport();
+  const fixture = createFaultFixture({ token, mode: "healthy" });
+  t.after(() => fixture.close());
+  const url = transport.register(fixture.server);
+  const resource = {
+    id: "business",
+    version: "v1",
+    environmentId: "test",
+    health: "healthy",
+    sampledAt: now(),
+    healthySamples: 3,
+    checks: [
+      {
+        id: "business",
+        url: url + "/business",
+        json: { path: "result", equals: "ready" },
+      },
+    ],
+  };
+  const samples = [2000, 1000, 0].map((age) => ({
+    resourceId: resource.id,
+    version: resource.version,
+    environmentId: resource.environmentId,
+    sampledAt: new Date(Date.now() - age).toISOString(),
+    healthy: true,
+    method: "http_json",
+  }));
+  let text;
+  let reviewCount = 0;
+  const options = {
+    resources: async () => [resource],
+    observations: async () => samples,
+    probe: (check) => httpProbe(check, { fetchImpl: transport.fetch }),
+    reviewer: {
+      review: async () => {
+        reviewCount++;
+        return {
+          reviewConversationId: "independent-fenced-" + reviewCount,
+          text,
+        };
+      },
+    },
+  };
+  const approved = '{"approved":true,"summary":"新鲜功能与连续采样通过。"}';
+  const fenced = "```json\n" + approved + "\n```";
+  text = fenced;
+  const accepted = await prove(requestFor(resource), options);
+  assert.equal(accepted.verdict, "pass");
+  assert.equal(
+    accepted.review,
+    fenced,
+    "stored evidence must retain the raw response, including its fence",
+  );
+  assert.equal(accepted.monitorSeries.observations.length, 3);
+  assert.equal(
+    accepted.checks[0].witness.assertions[0].observed.value,
+    "ready",
+  );
+  text =
+    '```json\r\n{"approved":false,"summary":"证据不足，拒绝通过。"}\r\n```';
+  assert.equal((await prove(requestFor(resource), options)).verdict, "fail");
+  const rejected = [
+    "Review complete.\n" + fenced,
+    fenced + "\nEverything passed.",
+    fenced + "\n" + fenced,
+    "```json\n" + approved,
+    "```json\n{broken}\n```",
+    "```json\nnull\n```",
+    "```json\n[]\n```",
+    '```json\n{"approved":"true","summary":"wrong type"}\n```',
+    '```json\n{"approved":true,"summary":""}\n```',
+    approved + " ".repeat(12000) + "surrounding commentary",
+  ];
+  for (text of rejected)
+    assert.equal(
+      (await prove(requestFor(resource), options)).verdict,
+      "inconclusive",
+    );
+  text = fenced;
+  const beforeGate = reviewCount;
+  samples[1].healthy = false;
+  assert.equal(
+    (await prove(requestFor(resource), options)).verdict,
+    "inconclusive",
+  );
+  assert.equal(
+    reviewCount,
+    beforeGate,
+    "a fenced approval cannot bypass invalid monitor history",
+  );
+  samples[1].healthy = true;
+  await transport.fetch(url + "/admin/fault", {
+    method: "POST",
+    headers: auth,
+    body: '{"broken":true}',
+  });
+  assert.equal((await prove(requestFor(resource), options)).verdict, "fail");
+  assert.equal(
+    reviewCount,
+    beforeGate,
+    "a fenced approval cannot bypass failed fixed business checks",
+  );
+});
+
 test("monitor skips disabled resources and scoped samples never include another resource", async (t) => {
   const transport = new InProcessTransport();
   const fixture = createFaultFixture({ token, mode: "healthy" });
