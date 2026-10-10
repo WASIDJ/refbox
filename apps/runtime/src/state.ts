@@ -28,6 +28,7 @@ export type Verification = {
   exitCode: number;
   output: string;
   summary: string;
+  assurance?: "execution_assertion";
 };
 export type Report = { date: string; at: string; markdown: string };
 export type Task = {

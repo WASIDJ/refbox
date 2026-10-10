@@ -18,7 +18,7 @@ func configForTest(engine string) Config {
 	return Config{EngineURL: engine, EngineToken: strings.Repeat("t", 40), PasswordHash: fmt.Sprintf("pbkdf2-sha256$100000$%s$%s", base64.RawURLEncoding.EncodeToString(salt), base64.RawURLEncoding.EncodeToString(key))}
 }
 func TestAuthAndProxy(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+strings.Repeat("t", 40) {
 			t.Error("missing internal auth")
 		}
@@ -26,12 +26,13 @@ func TestAuthAndProxy(t *testing.T) {
 			t.Error("browser cookies reached execution service")
 		}
 		w.Write([]byte(`{"ok":true}`))
-	}))
-	defer backend.Close()
-	s, err := New(configForTest(backend.URL))
+	})
+	s, err := New(configForTest("http://127.0.0.1:18801"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { s.Close() })
+	s.proxy.Transport = handlerTransport{backend}
 	unauth := httptest.NewRecorder()
 	s.ServeHTTP(unauth, httptest.NewRequest("GET", "/api/tasks", nil))
 	if unauth.Code != 401 {

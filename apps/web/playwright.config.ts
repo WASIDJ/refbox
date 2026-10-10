@@ -1,10 +1,14 @@
 import { defineConfig } from "@playwright/test";
 export default defineConfig({
   testDir: "./test",
-  timeout: 60000,
+  timeout: 30000,
+  expect: { timeout: 8000 },
   use: {
-    baseURL: process.env.REFBOX_TEST_URL ?? "http://127.0.0.1:8080",
+    baseURL: process.env.REFBOX_TEST_URL ?? "https://refbox.test",
     headless: true,
+    // Exercise the real Chromium browser, including GPU/iframe rendering.
+    // The separate macOS headless-shell build currently crashes its GPU helper.
+    channel: "chromium",
   },
   workers: 1,
 });

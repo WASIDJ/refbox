@@ -54,6 +54,7 @@ export function runtimeServer(engine: Engine, token: string) {
           version: "1.1.0",
           uid: process.getuid?.(),
           provider: "engy",
+          ...(await engine.readiness()),
         });
         return;
       }
@@ -67,6 +68,10 @@ export function runtimeServer(engine: Engine, token: string) {
       }
       if (req.method === "GET" && url.pathname === "/api/services") {
         send(res, 200, Object.values((await engine.board()).services));
+        return;
+      }
+      if (req.method === "GET" && parts[1] === "diagnoses" && parts[2]) {
+        send(res, 200, await engine.diagnosis(parts[2]));
         return;
       }
       if (req.method === "GET" && url.pathname === "/api/events") {
@@ -144,6 +149,8 @@ export function runtimeServer(engine: Engine, token: string) {
         const payload = await body(req);
         if (url.pathname === "/api/tasks")
           send(res, 201, await engine.create(payload, key));
+        else if (url.pathname === "/api/diagnoses")
+          send(res, 201, await engine.diagnose(payload, key));
         else if (url.pathname === "/api/services")
           send(res, 200, await engine.saveService(payload, key));
         else if (parts[1] === "tasks" && parts[2] && parts[3])
