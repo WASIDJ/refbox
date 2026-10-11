@@ -156,6 +156,12 @@ async function slowServer() {
     pending,
     counts,
     peak,
+    patch(fields: Record<string, unknown>) {
+      for (const response of pending.events)
+        response.write(
+          `event: snapshot_patch\ndata: ${JSON.stringify(fields)}\n\n`,
+        );
+    },
     release() {
       for (const endpoint of ["snapshot", "view"] as const) {
         const body = JSON.stringify(
@@ -202,6 +208,47 @@ test("slow snapshot and native-view bodies have at most one outstanding read eac
     expect(server.peak.view).toBe(1);
     expect(server.counts.snapshot).toBe(2);
     expect(server.counts.view).toBe(2);
+  } finally {
+    server.release();
+    await server.close();
+  }
+});
+
+test("incremental live state keeps complete evidence and replaces changed collections", async ({
+  page,
+}) => {
+  const server = await slowServer();
+  try {
+    const dialog = await openCompleteEvidence(page, server.url);
+    await expect.poll(() => server.pending.events.size).toBe(1);
+    server.patch({
+      resources: [
+        {
+          id: "nas",
+          name: "家庭 NAS",
+          kind: "machine",
+          health: "healthy",
+          sampledAt: at,
+          failures: 0,
+          healthySamples: 1,
+          checks: [],
+        },
+      ],
+    });
+    await expect(dialog.locator(".log-entry pre")).toHaveText(evidence);
+    await dialog.getByRole("button", { name: "关闭任务详情" }).click();
+    await page.getByRole("button", { name: "Homelab", exact: true }).click();
+    await expect(
+      page.getByRole("heading", { name: "家庭 NAS", exact: true }),
+    ).toBeVisible();
+    server.patch({ resources: [] });
+    await expect(
+      page.getByRole("heading", { name: "家庭 NAS", exact: true }),
+    ).toHaveCount(0);
+    await page.getByRole("button", { name: "长期任务", exact: true }).click();
+    await expect(page.locator(".task-card")).toHaveCount(1);
+    server.patch({ tasks: [] });
+    await expect(page.locator(".task-card")).toHaveCount(0);
   } finally {
     server.release();
     await server.close();

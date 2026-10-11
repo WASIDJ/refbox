@@ -5,7 +5,7 @@ const unresolvedRequests = new Map<string, string>();
 export async function api<T>(
   path: string,
   payload?: unknown,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; onResponse?: (response: Response) => void },
 ): Promise<T> {
   const body = payload === undefined ? undefined : JSON.stringify(payload);
   const intent = body === undefined ? undefined : `${path}:${body}`;
@@ -27,6 +27,7 @@ export async function api<T>(
           },
     ...(body === undefined ? {} : { body }),
   });
+  options?.onResponse?.(response);
   if (response.status === 401 && path !== "/login")
     window.dispatchEvent(new Event("refbox:unauthorized"));
   const text = await response.text();

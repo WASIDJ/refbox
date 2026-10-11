@@ -207,6 +207,7 @@ export default function App() {
   const modelsRequest = useRef<AbortController | null>(null);
   const readsStopped = useRef(false);
   const streamConnected = useRef(false);
+  const snapshotHash = useRef("");
   const [newTask, setNewTask] = useState({
     title: "",
     goal: "",
@@ -237,10 +238,15 @@ export default function App() {
     const controller = new AbortController();
     const promise = (async () => {
       try {
+        let hash = "";
         const data = await api<Snapshot>("/platform/snapshot", undefined, {
           signal: controller.signal,
+          onResponse: (response) => {
+            hash = response.headers.get("X-Refbox-Snapshot-Hash") ?? "";
+          },
         });
         if (!controller.signal.aborted) {
+          snapshotHash.current = hash;
           setSnapshot(data);
           setLoaded(true);
         }
@@ -263,6 +269,7 @@ export default function App() {
     modelsRequest.current?.abort();
     modelsRequest.current = null;
     streamConnected.current = false;
+    snapshotHash.current = "";
   }
   useEffect(() => {
     const expired = () => {
@@ -283,9 +290,6 @@ export default function App() {
     readsStopped.current = false;
     const modelsController = new AbortController();
     modelsRequest.current = modelsController;
-    void refresh().catch((cause) => {
-      if (active) setError((cause as Error).message);
-    });
     void api<typeof models>("/models", undefined, {
       signal: modelsController.signal,
     })
@@ -293,27 +297,49 @@ export default function App() {
         if (active) setModels(data);
       })
       .catch(() => {});
-    const stream = new EventSource("/api/platform/events");
-    streamRef.current = stream;
-    stream.addEventListener("snapshot", (event) => {
-      try {
-        const data = JSON.parse((event as MessageEvent).data) as Snapshot;
-        if (active && !readsStopped.current) {
-          setSnapshot(data);
+    function startStream() {
+      if (!active || readsStopped.current) return;
+      const hash = snapshotHash.current;
+      const stream = new EventSource(
+        `/api/platform/events?updates=patch&since=${encodeURIComponent(hash)}`,
+      );
+      streamRef.current = stream;
+      stream.onopen = () => {
+        if (active && !readsStopped.current && hash) {
           setConnected(true);
           streamConnected.current = true;
-          setLoaded(true);
         }
-      } catch {
-        if (active) setError("实时状态无法读取，正在重新同步");
-      }
-    });
-    stream.onerror = () => {
-      if (active) {
-        streamConnected.current = false;
-        setConnected(false);
-      }
-    };
+      };
+      const receive = (patch: boolean) => (event: Event) => {
+        try {
+          const data = JSON.parse((event as MessageEvent).data) as Snapshot;
+          if (active && !readsStopped.current) {
+            setSnapshot((current) => (patch ? { ...current, ...data } : data));
+            setConnected(true);
+            streamConnected.current = true;
+            setLoaded(true);
+          }
+        } catch {
+          if (active) setError("实时状态无法读取，正在重新同步");
+        }
+      };
+      stream.addEventListener("snapshot", receive(false));
+      stream.addEventListener("snapshot_patch", receive(true));
+      stream.onerror = () => {
+        if (active) {
+          streamConnected.current = false;
+          setConnected(false);
+        }
+      };
+    }
+    void refresh()
+      .then(startStream)
+      .catch((cause) => {
+        if (active) {
+          setError((cause as Error).message);
+          startStream();
+        }
+      });
     const timer = setInterval(() => {
       if (!streamConnected.current)
         void refresh().catch(() => {

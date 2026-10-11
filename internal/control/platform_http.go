@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -69,7 +70,25 @@ func (s *Server) writePlatformSnapshot(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 500, "snapshot unavailable")
 		return
 	}
+	w.Header().Set("X-Refbox-Snapshot-Hash", fmt.Sprintf("%x", sha256.Sum256(raw)))
 	writePlatformJSONBytes(w, r, raw)
+}
+
+func snapshotPatch(previous, current []byte) ([]byte, error) {
+	var before, after map[string]json.RawMessage
+	if err := json.Unmarshal(previous, &before); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(current, &after); err != nil {
+		return nil, err
+	}
+	changed := make(map[string]json.RawMessage)
+	for key, value := range after {
+		if !bytes.Equal(value, before[key]) {
+			changed[key] = value
+		}
+	}
+	return json.Marshal(changed)
 }
 
 func writePlatformJSON(w http.ResponseWriter, r *http.Request, value any) {
@@ -357,18 +376,25 @@ func (s *Server) platformAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
+		patchUpdates := r.URL.Query().Get("updates") == "patch"
 		var previous []byte
 		for {
 			raw, err := s.platformSnapshotJSON()
 			if err != nil {
 				return
 			}
-			if bytes.Equal(raw, previous) {
+			if bytes.Equal(raw, previous) || (patchUpdates && previous == nil && r.URL.Query().Get("since") == fmt.Sprintf("%x", sha256.Sum256(raw))) {
 				_, err = io.WriteString(writer, ": heartbeat\n\n")
+			} else if patchUpdates && previous != nil {
+				patch, patchErr := snapshotPatch(previous, raw)
+				if patchErr != nil {
+					return
+				}
+				_, err = fmt.Fprintf(writer, "event: snapshot_patch\ndata: %s\n\n", patch)
 			} else {
 				_, err = fmt.Fprintf(writer, "event: snapshot\ndata: %s\n\n", raw)
-				previous = raw
 			}
+			previous = raw
 			if err != nil {
 				return
 			}
