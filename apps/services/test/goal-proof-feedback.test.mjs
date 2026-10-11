@@ -1,3 +1,4 @@
+// goal-proof-feedback: 行为测试独立复跑 proveGoalResult 的失败反馈可定位/脱敏/限长。
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
