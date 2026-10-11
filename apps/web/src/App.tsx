@@ -1,4 +1,10 @@
-import { useDeferredValue, useEffect, useState, type FormEvent } from "react";
+import {
+  useDeferredValue,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import { api, relativeTime, timestamp } from "./api";
 import { Badge, Empty, Icon, Modal, StatusTriple } from "./components";
 import TaskDetail from "./TaskDetail";
@@ -192,6 +198,15 @@ export default function App() {
     [selectedIncident, setSelectedIncident] = useState("");
   const [models, setModels] = useState<{ id: string; name: string }[]>([]),
     [search, setSearch] = useState("");
+  const [readsEpoch, setReadsEpoch] = useState(0);
+  const refreshRequest = useRef<{
+    controller: AbortController;
+    promise: Promise<void>;
+  } | null>(null);
+  const streamRef = useRef<EventSource | null>(null);
+  const modelsRequest = useRef<AbortController | null>(null);
+  const readsStopped = useRef(false);
+  const streamConnected = useRef(false);
   const [newTask, setNewTask] = useState({
     title: "",
     goal: "",
@@ -217,9 +232,37 @@ export default function App() {
     `${item.title} ${item.goal}`.toLowerCase().includes(query),
   );
   async function refresh() {
-    const data = await api<Snapshot>("/platform/snapshot");
-    setSnapshot(data);
-    setLoaded(true);
+    if (readsStopped.current) return;
+    if (refreshRequest.current) return refreshRequest.current.promise;
+    const controller = new AbortController();
+    const promise = (async () => {
+      try {
+        const data = await api<Snapshot>("/platform/snapshot", undefined, {
+          signal: controller.signal,
+        });
+        if (!controller.signal.aborted) {
+          setSnapshot(data);
+          setLoaded(true);
+        }
+      } catch (cause) {
+        if (!controller.signal.aborted) throw cause;
+      } finally {
+        if (refreshRequest.current?.controller === controller)
+          refreshRequest.current = null;
+      }
+    })();
+    refreshRequest.current = { controller, promise };
+    return promise;
+  }
+  function stopReads() {
+    readsStopped.current = true;
+    refreshRequest.current?.controller.abort();
+    refreshRequest.current = null;
+    streamRef.current?.close();
+    streamRef.current = null;
+    modelsRequest.current?.abort();
+    modelsRequest.current = null;
+    streamConnected.current = false;
   }
   useEffect(() => {
     const expired = () => {
@@ -237,21 +280,28 @@ export default function App() {
   useEffect(() => {
     if (!authenticated) return;
     let active = true;
+    readsStopped.current = false;
+    const modelsController = new AbortController();
+    modelsRequest.current = modelsController;
     void refresh().catch((cause) => {
       if (active) setError((cause as Error).message);
     });
-    void api<typeof models>("/models")
+    void api<typeof models>("/models", undefined, {
+      signal: modelsController.signal,
+    })
       .then((data) => {
         if (active) setModels(data);
       })
       .catch(() => {});
     const stream = new EventSource("/api/platform/events");
+    streamRef.current = stream;
     stream.addEventListener("snapshot", (event) => {
       try {
         const data = JSON.parse((event as MessageEvent).data) as Snapshot;
-        if (active) {
+        if (active && !readsStopped.current) {
           setSnapshot(data);
           setConnected(true);
+          streamConnected.current = true;
           setLoaded(true);
         }
       } catch {
@@ -259,19 +309,25 @@ export default function App() {
       }
     });
     stream.onerror = () => {
-      if (active) setConnected(false);
+      if (active) {
+        streamConnected.current = false;
+        setConnected(false);
+      }
     };
-    const timer = setInterval(
-      () => void refresh().catch(() => setConnected(false)),
-      15000,
-    );
+    const timer = setInterval(() => {
+      if (!streamConnected.current)
+        void refresh().catch(() => {
+          if (active) setConnected(false);
+        });
+    }, 15000);
     return () => {
       active = false;
-      stream.close();
+      modelsController.abort();
+      stopReads();
       clearInterval(timer);
       setConnected(false);
     };
-  }, [authenticated]);
+  }, [authenticated, readsEpoch]);
   useEffect(() => {
     if (!message) return;
     const timer = setTimeout(() => setMessage(""), 6000);
@@ -287,7 +343,11 @@ export default function App() {
     setMessage("");
     try {
       await operation();
-      if (authenticated && refreshAfter) await refresh();
+      if (authenticated && refreshAfter) {
+        refreshRequest.current?.controller.abort();
+        refreshRequest.current = null;
+        await refresh();
+      }
       if (success) setMessage(success);
       return true;
     } catch (cause) {
@@ -310,7 +370,8 @@ export default function App() {
     );
   }
   async function logout() {
-    await perform(
+    stopReads();
+    const success = await perform(
       async () => {
         await api("/logout", {});
         setAuthenticated(false);
@@ -321,6 +382,7 @@ export default function App() {
       undefined,
       false,
     );
+    if (!success) setReadsEpoch((value) => value + 1);
   }
   async function createTask(event: FormEvent) {
     event.preventDefault();

@@ -69,6 +69,21 @@ func (s *Server) writePlatformSnapshot(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, 500, "snapshot unavailable")
 		return
 	}
+	writePlatformJSONBytes(w, r, raw)
+}
+
+func writePlatformJSON(w http.ResponseWriter, r *http.Request, value any) {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		jsonError(w, 500, "platform response unavailable")
+		return
+	}
+	writePlatformJSONBytes(w, r, raw)
+}
+
+// Independent proof and native history can contain large raw witnesses. Keep
+// the entire JSON while negotiating a smaller private HTTP representation.
+func writePlatformJSONBytes(w http.ResponseWriter, r *http.Request, raw []byte) {
 	w.Header().Add("Vary", "Accept-Encoding")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -877,7 +892,7 @@ func (s *Server) platformTaskAPI(w http.ResponseWriter, r *http.Request, parts [
 		return
 	}
 	if len(parts) == 4 && r.Method == "GET" {
-		writeJSON(w, 200, t)
+		writePlatformJSON(w, r, t)
 		return
 	}
 	if len(parts) != 5 {
@@ -958,7 +973,7 @@ func (s *Server) platformTaskAPI(w http.ResponseWriter, r *http.Request, parts [
 			jsonError(w, 503, "原生任务数据暂不可读")
 			return
 		}
-		writeJSON(w, 200, map[string]any{"view": v, "task": n})
+		writePlatformJSON(w, r, map[string]any{"view": v, "task": n})
 		return
 	}
 	allowed := action == "artifact" && r.Method == "GET" || r.Method == "POST" && (action == "plan" || action == "approve" || action == "stop" || action == "continue" || action == "steer" || action == "report")

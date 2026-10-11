@@ -2,7 +2,11 @@
 // requests clear the receipt so a later identical instruction is a new action.
 const unresolvedRequests = new Map<string, string>();
 
-export async function api<T>(path: string, payload?: unknown): Promise<T> {
+export async function api<T>(
+  path: string,
+  payload?: unknown,
+  options?: { signal?: AbortSignal },
+): Promise<T> {
   const body = payload === undefined ? undefined : JSON.stringify(payload);
   const intent = body === undefined ? undefined : `${path}:${body}`;
   let requestKey: string | undefined;
@@ -11,6 +15,7 @@ export async function api<T>(path: string, payload?: unknown): Promise<T> {
     unresolvedRequests.set(intent, requestKey);
   }
   const response = await fetch("/api" + path, {
+    signal: options?.signal,
     method: payload === undefined ? "GET" : "POST",
     headers:
       payload === undefined

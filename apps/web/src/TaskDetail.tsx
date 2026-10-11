@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api, timestamp } from "./api";
 import { Badge, Empty, Modal, StatusTriple } from "./components";
 import type { LegacyTask, Plan, Task, View } from "./types";
@@ -33,22 +33,43 @@ export default function TaskDetail({
     criteria: "",
     verificationCommand: "",
   });
+  const loadRequest = useRef<{
+    controller: AbortController;
+    promise: Promise<void>;
+  } | null>(null);
   async function load() {
-    try {
-      const data = await api<{ view: View; task: LegacyTask }>(
-        `/platform/tasks/${encodeURIComponent(task.id)}/view`,
-      );
-      setLegacy(data.task);
-      setView(data.view);
-      setViewError("");
-    } catch (cause) {
-      setViewError((cause as Error).message);
-    }
+    if (loadRequest.current) return loadRequest.current.promise;
+    const controller = new AbortController();
+    const promise = (async () => {
+      try {
+        const data = await api<{ view: View; task: LegacyTask }>(
+          `/platform/tasks/${encodeURIComponent(task.id)}/view`,
+          undefined,
+          { signal: controller.signal },
+        );
+        if (!controller.signal.aborted) {
+          setLegacy(data.task);
+          setView(data.view);
+          setViewError("");
+        }
+      } catch (cause) {
+        if (!controller.signal.aborted) setViewError((cause as Error).message);
+      } finally {
+        if (loadRequest.current?.controller === controller)
+          loadRequest.current = null;
+      }
+    })();
+    loadRequest.current = { controller, promise };
+    return promise;
   }
   useEffect(() => {
     void load();
     const timer = setInterval(() => void load(), 5000);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      loadRequest.current?.controller.abort();
+      loadRequest.current = null;
+    };
   }, [task.id]);
   useEffect(() => setBusiness(task.businessStatus), [task.businessStatus]);
   const execution = legacy?.status ?? task.executionStatus;
@@ -66,6 +87,8 @@ export default function TaskDetail({
     setError("");
     try {
       await operation();
+      loadRequest.current?.controller.abort();
+      loadRequest.current = null;
       await Promise.all([refresh(), load()]);
       return true;
     } catch (cause) {
