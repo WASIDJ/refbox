@@ -5,6 +5,7 @@ import {
   existsSync,
   renameSync,
   rmSync,
+  symlinkSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
@@ -59,6 +60,21 @@ if (!existsSync(runtime)) {
 const version = execFileSync(resolve(runtime, "bin/node"), ["--version"], {
   encoding: "utf8",
 }).trim();
+// Background root jobs must not pick an external Homebrew bash and wait on
+// macOS privacy access before the command even starts.
+const shell = resolve(runtime, "bin/bash");
+if (!existsSync(shell)) symlinkSync("/bin/bash", shell);
+const goRoot = execFileSync("go", ["env", "GOROOT"], {
+  encoding: "utf8",
+}).trim();
+execFileSync("/usr/bin/ditto", [
+  "--noextattr",
+  "--norsrc",
+  goRoot,
+  resolve(runtime, "go"),
+]);
+const go = resolve(runtime, "bin/go");
+if (!existsSync(go)) symlinkSync("../go/bin/go", go);
 writeFileSync(
   resolve(output, "daemon-node.json"),
   JSON.stringify({ version, filename, sha256: actual }, null, 2) + "\n",
