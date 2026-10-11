@@ -178,6 +178,9 @@ function safeEnvironment(env, scratch) {
   clean.NPM_CONFIG_CACHE = join(scratch, "npm-cache");
   clean.GIT_CONFIG_GLOBAL = join(scratch, "empty-config");
   clean.GIT_CONFIG_NOSYSTEM = "1";
+  // Candidate tests use their own Wiki fixtures; never fall back to the user's
+  // external vault, which background macOS processes may block on indefinitely.
+  clean.REFBOX_WIKI_DIR = join(scratch, "isolated-test-wiki");
   clean.CI = "true";
   return clean;
 }
