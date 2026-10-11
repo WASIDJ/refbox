@@ -566,6 +566,7 @@ func TestFrozenProofBoundary(t *testing.T) {
   assert.deepEqual(red.checks[0].witness.runs[0].argv, [
     "go",
     "test",
+    "-buildvcs=true",
     "-race",
     "-count=1",
     "-v",

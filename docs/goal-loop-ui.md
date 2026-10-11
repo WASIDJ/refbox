@@ -10,7 +10,7 @@ Homelab、服务事件、其他插件工作区保持原导航。旧任务功能�
 
 2026-10-11，TypeScript/生产构建通过；实际 Chromium 加模拟 API 的七项界面回归通过。新增回归检查单输入提交精确 `{goal}`、无审批/手填命令、暂停/继续/建议、固定标准和被拒成果反馈、每轮证明及 375px 无横向溢出。五项原有监控/插件/历史任务回归继续通过。这不是实际模型、自主目标或生产验收。
 
-真实 GoalA/GoalB 验收待后端闭环、隔离验收服务和最终部署入口就绪后运行。准备好的只读浏览器检查要求显式指定已创建的任务 ID，不重复提交或手工 approve/accept：
+真实 A/B/C/D 已在隔离验收图中通过并逐轮采用，详见[实际自指验收](self-reference-acceptance.md)。C 补充了长文本回归：真实 375px 与 1440px 浏览器均通过，外置真实文本裁判也确认没有横向溢出。只读线上浏览器检查要求指定该部署图中已存在的任务 ID，不重复提交或手工 approve/accept：
 
 ```bash
 REFBOX_LIVE_TEST=1 REFBOX_TEST_URL=https://refbox.jeffkafka.top \

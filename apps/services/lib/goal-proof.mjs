@@ -501,6 +501,7 @@ async function runTrustedCommand(
       );
     const success = await step("go", [
       "test",
+      "-buildvcs=true",
       "-race",
       "-count=1",
       "-v",
@@ -609,6 +610,7 @@ async function runTrustedCommand(
       if (passed)
         passed = await step("go", [
           "build",
+          "-buildvcs=true",
           "-o",
           join(scratch, "build-refbox"),
           "./cmd/refbox",
@@ -616,6 +618,7 @@ async function runTrustedCommand(
       if (passed)
         passed = await step("go", [
           "build",
+          "-buildvcs=true",
           "-o",
           join(scratch, "build-refbox-broker"),
           "./cmd/refbox-broker",
@@ -638,7 +641,7 @@ async function runTrustedCommand(
     if (command === "tests") {
       passed = await goTests();
     } else if (command === "build")
-      passed = await step("go", ["build", "./..."]);
+      passed = await step("go", ["build", "-buildvcs=true", "./..."]);
     else
       throw new Error(
         "UI check is not available in this trusted baseline profile",
