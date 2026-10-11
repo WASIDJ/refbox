@@ -48,10 +48,13 @@
 }
 .goal-progress {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
+  min-width: 0;
 }
 .goal-progress .section-card {
   margin: 0;
+  min-width: 0;
 }
 .goal-phase h3 {
   margin: 0;
@@ -60,6 +63,9 @@
 .goal-phase .section-heading {
   flex-wrap: wrap;
 }
+.goal-phase p {
+  overflow-wrap: anywhere;
+}
 .goal-feedback {
   margin-top: 16px;
   padding-top: 16px;
@@ -67,9 +73,11 @@
 }
 .goal-feedback p {
   margin-top: 8px;
+  overflow-wrap: anywhere;
 }
 .goal-criteria {
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .goal-check-list {
   padding-left: 22px;
@@ -82,21 +90,33 @@
 .goal-contract details {
   margin-top: 18px;
 }
+.goal-contract > p {
+  overflow-wrap: anywhere;
+}
 .goal-controls {
   margin: 20px 0;
 }
 .goal-reviews {
   margin: 24px 0;
+  min-width: 0;
+}
+.goal-reviews .section-card {
+  min-width: 0;
+}
+.goal-reviews .section-card > p {
+  overflow-wrap: anywhere;
 }
 .goal-metadata,
 .legacy-controls {
   margin-top: 18px;
+  min-width: 0;
 }
 .legacy-controls[open] > summary {
   margin-bottom: 18px;
 }
 .execution-checks {
   margin: 24px 0;
+  min-width: 0;
 }
 .execution-checks[open] > summary {
   margin-bottom: 16px;
@@ -271,6 +291,7 @@ pre {
   overflow-wrap: anywhere;
   line-height: 1.7;
   max-width: 100%;
+  min-width: 0;
 }
 details {
   margin-top: 15px;
@@ -626,6 +647,8 @@ summary {
   color: #4a586b;
   white-space: nowrap;
   line-height: 1.5;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 .badge.state-healthy,
 .badge.state-pass,
@@ -962,6 +985,7 @@ summary {
   color: var(--text);
   background: #fff;
   box-shadow: 0 22px 80px #10233830;
+  min-width: 0;
 }
 .modal::backdrop {
   background: #10203870;
@@ -1021,6 +1045,9 @@ summary {
   background: transparent;
   padding: 10px 12px;
   font-size: 14px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 .detail-tabs button[aria-pressed="true"] {
   color: var(--primary);
@@ -1029,6 +1056,9 @@ summary {
 }
 .detail-content > h3 {
   margin-top: 26px;
+}
+.detail-content {
+  min-width: 0;
 }
 .detail-content > h3:first-child {
   margin-top: 0;
@@ -1052,6 +1082,7 @@ summary {
 }
 .key-values {
   margin: 20px 0;
+  min-width: 0;
 }
 .key-values > div {
   display: grid;
@@ -1060,6 +1091,7 @@ summary {
   padding: 9px 0;
   font-size: 14px;
   border-bottom: 1px solid #e6eaf0;
+  min-width: 0;
 }
 .key-values dt {
   color: var(--muted);
@@ -1074,6 +1106,7 @@ summary {
   border: 1px solid var(--border);
   border-radius: 8px;
   margin-bottom: 18px;
+  min-width: 0;
 }
 .section-card h4 {
   margin-top: 10px;
@@ -1083,6 +1116,7 @@ summary {
   background: #f7f8fa;
   border: 1px solid var(--border);
   border-radius: 8px;
+  min-width: 0;
 }
 .plan-form h3 {
   margin-bottom: 16px;
@@ -1100,6 +1134,7 @@ summary {
   border-bottom: 1px solid var(--border);
   margin-bottom: 20px;
   padding-bottom: 12px;
+  min-width: 0;
 }
 .log-entry h4 {
   margin-bottom: 8px;
@@ -1149,6 +1184,7 @@ summary {
   border-top: 1px solid var(--border);
   padding: 12px 0 0;
   margin-top: 12px;
+  min-width: 0;
 }
 .proof-check > div {
   display: flex;
@@ -1159,6 +1195,7 @@ summary {
 .proof-check p {
   font-size: 14px;
   margin: 8px 0;
+  overflow-wrap: anywhere;
 }
 .diagnosis-text {
   white-space: pre-wrap;
