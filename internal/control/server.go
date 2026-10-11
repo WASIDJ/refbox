@@ -110,7 +110,7 @@ func New(cfg Config) (*Server, error) {
 		writeJSON(w, 200, map[string]bool{"authenticated": s.authenticated(r)})
 	})
 	s.mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"ok": true, "service": "refbox-control", "version": buildRevision()})
+		writeJSON(w, 200, map[string]any{"ok": true, "service": "refbox-control", "version": "2", "revision": buildRevision()})
 	})
 	s.mux.HandleFunc("/internal/", s.internalAPI)
 	s.mux.HandleFunc("/api/", s.api)
