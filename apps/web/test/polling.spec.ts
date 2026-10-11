@@ -4,7 +4,10 @@ import { readFile } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
 import type { Socket } from "node:net";
 
-const dist = resolve(import.meta.dirname, "../dist");
+const dist = resolve(
+  process.env.REFBOX_POLLING_TEST_DIST ??
+    resolve(import.meta.dirname, "../dist"),
+);
 const evidence = `Evidence start\n${"Complete independent witness\n".repeat(4000)}Evidence end`;
 const at = new Date().toISOString();
 const task = {
@@ -65,14 +68,16 @@ const nativeView = {
 
 // Use real HTTP responses rather than held Playwright routes. Closing an aborted
 // response is then observable at the server, including a body still in flight.
-async function slowServer() {
+async function slowServer(stallFirstLogout = false) {
   let authenticated = false;
   const sockets = new Set<Socket>();
   const pending = {
     snapshot: new Set<ServerResponse>(),
     view: new Set<ServerResponse>(),
     events: new Set<ServerResponse>(),
+    logout: new Set<ServerResponse>(),
   };
+  const logoutReceipts: string[] = [];
   const counts = { snapshot: 0, view: 0, logout: 0 };
   const peak = { snapshot: 0, view: 0 };
   const server = createServer(async (request, response) => {
@@ -105,12 +110,20 @@ async function slowServer() {
       authenticated = true;
       return json({});
     }
-    if (!authenticated) return json({ error: "请登录" }, 401);
     if (path === "/api/logout") {
       counts.logout++;
+      logoutReceipts.push(String(request.headers["idempotency-key"]));
       authenticated = false;
+      if (stallFirstLogout && counts.logout === 1) {
+        pending.logout.add(response);
+        response.on("close", () => pending.logout.delete(response));
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.write('{"ok":');
+        return;
+      }
       return json({});
     }
+    if (!authenticated) return json({ error: "请登录" }, 401);
     if (path === "/api/models")
       return json([{ id: "kimi-k3", name: "Kimi K3" }]);
     if (path === "/api/platform/events") {
@@ -156,6 +169,7 @@ async function slowServer() {
     pending,
     counts,
     peak,
+    logoutReceipts,
     patch(fields: Record<string, unknown>) {
       for (const response of pending.events)
         response.write(
@@ -208,6 +222,28 @@ test("slow snapshot and native-view bodies have at most one outstanding read eac
     expect(server.peak.view).toBe(1);
     expect(server.counts.snapshot).toBe(2);
     expect(server.counts.view).toBe(2);
+  } finally {
+    server.release();
+    await server.close();
+  }
+});
+
+test("stalled logout retries the same receipt and waits for server acknowledgement", async ({
+  page,
+}) => {
+  const server = await slowServer(true);
+  try {
+    const dialog = await openCompleteEvidence(page, server.url);
+    await dialog.getByRole("button", { name: "关闭任务详情" }).click();
+    await page.getByRole("button", { name: "退出登录", exact: true }).click();
+    await expect.poll(() => server.pending.logout.size).toBe(1);
+    await expect(page.getByLabel("管理员密码")).toHaveCount(0);
+    await page.clock.runFor(6000);
+    await expect(page.getByLabel("管理员密码")).toBeVisible();
+    expect(server.counts.logout).toBe(2);
+    expect(server.logoutReceipts[0]).toBeTruthy();
+    expect(server.logoutReceipts[1]).toBe(server.logoutReceipts[0]);
+    await expect.poll(() => server.pending.logout.size).toBe(0);
   } finally {
     server.release();
     await server.close();

@@ -5,7 +5,7 @@ import {
   useState,
   type FormEvent,
 } from "react";
-import { api, relativeTime, timestamp } from "./api";
+import { api, logoutSession, relativeTime, timestamp } from "./api";
 import { Badge, Empty, Icon, Modal, StatusTriple } from "./components";
 import TaskDetail from "./TaskDetail";
 import { goalPhases } from "./GoalProgress";
@@ -399,7 +399,7 @@ export default function App() {
     stopReads();
     const success = await perform(
       async () => {
-        await api("/logout", {});
+        await logoutSession();
         setAuthenticated(false);
         setSnapshot(emptySnapshot);
         setSelectedTask("");

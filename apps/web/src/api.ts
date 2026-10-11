@@ -51,6 +51,25 @@ export async function api<T>(
     );
   return value as T;
 }
+
+// Logout is idempotent. A stalled transport must not keep the controls disabled
+// forever, or claim that the session closed before the server acknowledged it.
+export async function logoutSession(): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    try {
+      await api("/logout", {}, { signal: controller.signal });
+      return;
+    } catch (cause) {
+      if (!controller.signal.aborted && !(cause instanceof TypeError))
+        throw cause;
+      if (attempt === 2) throw new Error("退出请求暂未确认，请重试");
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
 export const timestamp = (value?: string) => {
   if (!value || Number.isNaN(Date.parse(value))) return "尚未采样";
   return new Date(value).toLocaleString("zh-CN", {
