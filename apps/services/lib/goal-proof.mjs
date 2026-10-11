@@ -617,10 +617,6 @@ async function runTrustedCommand(
               include: tests,
               exclude: [],
               passWithNoTests: false,
-              // Runner 在密集子进程/资源竞争下默认 10s hook 超时可能偶发误报。
-              // 固定 runner 需要稳定复跑既有回归而不削弱其断言或超时外的行为边界。
-              hookTimeout: 30000,
-              testTimeout: 30000,
             },
           }) +
           ";\n",
