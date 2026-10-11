@@ -64,6 +64,8 @@ const version = execFileSync(resolve(runtime, "bin/node"), ["--version"], {
 // macOS privacy access before the command even starts.
 const shell = resolve(runtime, "bin/bash");
 if (!existsSync(shell)) symlinkSync("/bin/bash", shell);
+const python = resolve(runtime, "bin/python3");
+if (!existsSync(python)) symlinkSync("/usr/bin/python3", python);
 const goRoot = execFileSync("go", ["env", "GOROOT"], {
   encoding: "utf8",
 }).trim();
