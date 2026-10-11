@@ -73,15 +73,18 @@ func TestHealthEndpointReturnsVersion(t *testing.T) {
 	if body["service"] != "refbox-control" {
 		t.Fatal("health missing service=refbox-control")
 	}
-	version, ok := body["version"].(string)
-	if !ok {
-		t.Fatal("health missing version string")
+	// The service API version is a compatibility contract, not the source revision.
+	if body["version"] != "2" {
+		t.Fatalf("health API version changed: got %v, want 2", body["version"])
 	}
-	if version == "" {
-		t.Fatal("version must not be empty")
+	revision, ok := body["revision"].(string)
+	if !ok || revision == "" {
+		t.Fatal("health missing non-empty build revision string")
 	}
-	// version should be either a Git revision or the explicit fallback
-	if version != "unknown" && len(version) < 7 {
-		t.Fatalf("version %q is neither a plausible Git revision nor \"unknown\"", version)
+	if revision != buildRevision() {
+		t.Fatalf("health revision %q differs from actual build revision %q", revision, buildRevision())
+	}
+	if revision != "unknown" && len(revision) < 7 {
+		t.Fatalf("revision %q is neither a plausible Git revision nor unknown", revision)
 	}
 }
