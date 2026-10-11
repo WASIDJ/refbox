@@ -454,7 +454,18 @@ async function prepareTrustedValidation({
     modifiedFrozenFiles,
     frozenDefinitionSha256: hash(JSON.stringify(frozenFiles)),
   };
-  return { trusted, verification, dependencies, all, supervisor };
+  // Frozen baseline files cannot be changed. New candidate tests must also run:
+  // otherwise the reviewer receives their source without a real execution witness.
+  const candidateFiles = (await git(verification, ["ls-files", "-z"], options))
+    .split("\0")
+    .filter(Boolean);
+  return {
+    trusted,
+    verification,
+    dependencies,
+    all: [...new Set([...all, ...candidateFiles])].sort(),
+    supervisor,
+  };
 }
 
 async function runTrustedCommand(
@@ -488,7 +499,7 @@ async function runTrustedCommand(
     if (!paths.length) throw new Error("Trusted Go test set is empty");
     const required = new Set();
     for (const path of paths) {
-      const source = await readFile(join(validation.trusted, path), "utf8");
+      const source = await readFile(join(verification, path), "utf8");
       for (const match of source.matchAll(
         /^\s*func\s+(Test[A-Za-z0-9_]+)\s*\(/gm,
       ))

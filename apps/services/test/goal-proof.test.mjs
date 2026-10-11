@@ -348,6 +348,40 @@ async function gitFixture(t) {
   return { ...fixtureData, git };
 }
 
+test("independent host runs candidate-added tests without relaxing the frozen baseline", async (t) => {
+  const { cwd, context, options, git } = await gitFixture(t);
+  await writeFile(
+    join(cwd, "increment.mjs"),
+    "export const increment = n => n + 1;\n",
+  );
+  await writeFile(
+    join(cwd, "added-regression.test.mjs"),
+    "import test from 'node:test'; import assert from 'node:assert/strict'; test('new candidate regression must actually run',()=>assert.fail('actual added regression failure'));\n",
+  );
+  await git(["add", "."]);
+  await git(["commit", "--quiet", "-m", "add real candidate regression"]);
+  let reviewed = false;
+  const proof = await proveGoalResult(
+    { taskId: context.taskId, contractHash: context.contract.hash },
+    {
+      ...options,
+      reviewer: {
+        review: async () => {
+          reviewed = true;
+          return affirmative.review();
+        },
+      },
+    },
+  );
+  assert.equal(proof.verdict, "fail");
+  assert.equal(reviewed, false);
+  const check = proof.checks.find((check) => check.id === "real-tests");
+  assert.equal(check.passed, false);
+  assert.match(check.witness.stdout, /actual added regression failure/);
+  assert.ok(check.witness.runs[0].argv.includes("added-regression.test.mjs"));
+  assert.deepEqual(check.witness.trustedBaseline.modifiedFrozenFiles, []);
+});
+
 test("Git proof runs actual tests in independent clean committed checkout with source diff, sanitized environment and artifact hashes", async (t) => {
   const { cwd, context, options, git, proofRoot } = await gitFixture(t);
   await writeFile(join(cwd, ".env"), "REFBOX_ENGINE_TOKEN=do-not-copy-this");
