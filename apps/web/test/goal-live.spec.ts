@@ -91,6 +91,16 @@ test("live deployment: autonomous goals expose shared contracts and actual indep
       .filter({ has: page.getByText(task.goal, { exact: true }) })
       .click();
     const dialog = page.getByRole("dialog", { name: "任务详情" });
+    if (expectedPass) {
+      await expect(
+        dialog.locator(".state-triple").getByText("执行结束", { exact: true }),
+      ).toBeVisible();
+      await expect(
+        dialog
+          .locator(".state-triple")
+          .getByText("等待独立验证", { exact: true }),
+      ).toHaveCount(0);
+    }
     await expect(
       dialog.getByText(contract.criteria, { exact: true }),
     ).toBeVisible();

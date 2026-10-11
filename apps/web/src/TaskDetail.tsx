@@ -131,6 +131,7 @@ export default function TaskDetail({
           business={task.businessStatus}
           execution={execution}
           proof={task.verificationStatus}
+          goalPhase={task.goalLoop?.phase}
         />
       </div>
       {!task.engineAvailable && (

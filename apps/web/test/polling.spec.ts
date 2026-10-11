@@ -18,7 +18,7 @@ const task = {
   cwd: "/isolated/slow-goal",
   model: "kimi-k3",
   businessStatus: "done",
-  executionStatus: "stopped",
+  executionStatus: "awaiting_verification",
   verificationStatus: "pass",
   createdAt: at,
   updatedAt: at,
@@ -45,7 +45,7 @@ const nativeView = {
   task: {
     ...task,
     id: task.conversationId,
-    status: "stopped",
+    status: "awaiting_verification",
     plan: null,
     approvedPlan: null,
     reason: "",
@@ -222,6 +222,34 @@ test("slow snapshot and native-view bodies have at most one outstanding read eac
     expect(server.peak.view).toBe(1);
     expect(server.counts.snapshot).toBe(2);
     expect(server.counts.view).toBe(2);
+  } finally {
+    server.release();
+    await server.close();
+  }
+});
+
+test("independently completed goal shows execution ended while preserving native self-check state", async ({
+  page,
+}) => {
+  const server = await slowServer();
+  try {
+    const dialog = await openCompleteEvidence(page, server.url);
+    await expect(
+      dialog.locator(".state-triple").getByText("执行结束", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      dialog
+        .locator(".state-triple")
+        .getByText("等待独立验证", { exact: true }),
+    ).toHaveCount(0);
+    await dialog.getByRole("button", { name: "关闭任务详情" }).click();
+    await expect(
+      page
+        .locator(".task-card .state-triple")
+        .getByText("执行结束", { exact: true }),
+    ).toBeVisible();
+    expect(nativeView.task.status).toBe("awaiting_verification");
+    expect(nativeView.task.verified).toBe(false);
   } finally {
     server.release();
     await server.close();

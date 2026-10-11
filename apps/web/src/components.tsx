@@ -152,10 +152,12 @@ export function StatusTriple({
   business,
   execution,
   proof,
+  goalPhase,
 }: {
   business: string;
   execution: string;
   proof: string;
+  goalPhase?: string;
 }) {
   return (
     <dl className="state-triple">
@@ -168,7 +170,13 @@ export function StatusTriple({
       <div>
         <dt>执行</dt>
         <dd>
-          <Badge state={execution} />
+          <Badge
+            state={
+              goalPhase === "completed" && proof === "pass"
+                ? "completed"
+                : execution
+            }
+          />
         </dd>
       </div>
       <div>

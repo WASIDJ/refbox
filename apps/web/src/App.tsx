@@ -954,6 +954,7 @@ export default function App() {
                           business={item.businessStatus}
                           execution={item.executionStatus}
                           proof={item.verificationStatus}
+                          goalPhase={item.goalLoop?.phase}
                         />
                         {!item.engineAvailable && (
                           <span className="offline-note">执行服务离线</span>
