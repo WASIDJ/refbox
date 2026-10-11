@@ -43,6 +43,50 @@ const relativeFile = (path) =>
 const bounded = (text, max = 16384) =>
   Buffer.from(text).subarray(0, max).toString("utf8");
 
+/**
+ * 为独立固定验收失败的 check 生成可定位、脱敏、限长原因，帮助执行 Agent 在
+ * 原冻结方案下自我修复，而不是只看到 check ID。reason 来源是真实 witness，
+ * 已经过 sanitizer 脱敏（凭据替换为 [REDACTED]），整体长度由调用方 2000 上限把关。
+ */
+const SUMMARY_LIMIT = 2000;
+const snippet = (text, max) => {
+  const normalized = String(text ?? "").replace(/\s+/g, " ").trim();
+  return normalized.length <= max ? normalized : `${normalized.slice(0, max)}…`;
+};
+
+export function failedCheckFeedback(check, definition = check) {
+  // check 为 proveGoalResult 生成的 result；definition 为冻结契约中的原始 check 描述。
+  if (check.unavailable)
+    return `验证能力不可用：${snippet(check.detail || check.witness?.error || "独立验证环境异常", 300)}`;
+  if (check.kind !== "command") {
+    if (check.detail) return `文件检查异常：${snippet(check.detail, 300)}`;
+    const witness = check.witness ?? {};
+    if (!witness.sha256) return `文件缺失或不可读：${snippet(definition.path ?? witness.path ?? "未知路径", 200)}`;
+    if (check.kind === "file_contains")
+      return `文件缺少期望内容（截断展示）：${snippet(JSON.stringify(definition.contains ?? ""), 200)}`;
+    if (check.kind === "json_equals")
+      return `JSON 字段不匹配：期望 ${snippet(JSON.stringify(definition.equals), 200)}，实际 ${snippet(witness.observedJson ?? "undefined", 200)}`;
+    return "固定文件验收未通过";
+  }
+  const witness = check.witness ?? {};
+  if (witness.fixtureCoverageFailure)
+    return `缺失冻结测试：${snippet(witness.fixtureCoverageFailure, 400)}`;
+  if (check.detail) return `命令执行异常：${snippet(check.detail, 400)}`;
+  const parts = [];
+  if (typeof witness.exitCode === "number")
+    parts.push(`退出码 ${witness.exitCode}`);
+  if (witness.timedOut) parts.push("超时");
+  if (witness.unavailable) parts.push("执行不可用");
+  const stderr = snippet(witness.stderr ?? "", 300);
+  if (stderr) parts.push(`stderr: ${stderr}`);
+  else {
+    // node --test 等运行器把失败详情写到 stdout。
+    const stdout = snippet(witness.stdout ?? "", 300);
+    if (stdout) parts.push(`stdout: ${stdout}`);
+  }
+  return parts.length ? parts.join("；") : "命令未通过且无输出";
+}
+
 export function validateGoalChecks(checks) {
   if (!Array.isArray(checks) || !checks.length || checks.length > 32)
     throw new HttpError(400, "目标需要 1–32 个固定验收项。");
@@ -1189,12 +1233,18 @@ export async function proveGoalResult(
       return {
         ...base,
         verdict: "fail",
-        summary:
+        summary: (
           "独立重跑的固定验收项失败：" +
           base.checks
             .filter((check) => !check.passed)
-            .map((check) => check.id)
-            .join(", "),
+            .map((check) => {
+              const definition = contract.checks.find(
+                (fixed) => fixed.id === check.id,
+              );
+              return `${check.id}: ${failedCheckFeedback(check, definition)}`;
+            })
+            .join("；")
+        ).slice(0, SUMMARY_LIMIT),
       };
     if (!base.evidence.artifacts.some((artifact) => !artifact.unavailable))
       return {
