@@ -71,7 +71,40 @@ func (s *Server) writePlatformSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("X-Refbox-Snapshot-Hash", fmt.Sprintf("%x", sha256.Sum256(raw)))
+	fields, err := snapshotFieldHashes(raw)
+	if err != nil {
+		jsonError(w, 500, "snapshot unavailable")
+		return
+	}
+	encodedFields, _ := json.Marshal(fields)
+	w.Header().Set("X-Refbox-Snapshot-Fields", string(encodedFields))
 	writePlatformJSONBytes(w, r, raw)
+}
+
+func snapshotFieldHashes(raw []byte) (map[string]string, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	hashes := make(map[string]string, len(fields))
+	for key, value := range fields {
+		hashes[key] = fmt.Sprintf("%x", sha256.Sum256(value))
+	}
+	return hashes, nil
+}
+
+func snapshotPatchFromHashes(hashes map[string]string, raw []byte) ([]byte, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	changed := make(map[string]json.RawMessage)
+	for key, value := range fields {
+		if hashes[key] != fmt.Sprintf("%x", sha256.Sum256(value)) {
+			changed[key] = value
+		}
+	}
+	return json.Marshal(changed)
 }
 
 func snapshotPatch(previous, current []byte) ([]byte, error) {
@@ -377,13 +410,27 @@ func (s *Server) platformAPI(w http.ResponseWriter, r *http.Request) {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		patchUpdates := r.URL.Query().Get("updates") == "patch"
+		var seedFields map[string]string
+		if err := json.Unmarshal([]byte(r.URL.Query().Get("fields")), &seedFields); err != nil {
+			seedFields = nil
+		}
 		var previous []byte
 		for {
 			raw, err := s.platformSnapshotJSON()
 			if err != nil {
 				return
 			}
-			if bytes.Equal(raw, previous) || (patchUpdates && previous == nil && r.URL.Query().Get("since") == fmt.Sprintf("%x", sha256.Sum256(raw))) {
+			if patchUpdates && previous == nil && len(seedFields) > 0 {
+				patch, patchErr := snapshotPatchFromHashes(seedFields, raw)
+				if patchErr != nil {
+					return
+				}
+				if string(patch) == "{}" {
+					_, err = io.WriteString(writer, ": heartbeat\n\n")
+				} else {
+					_, err = fmt.Fprintf(writer, "event: snapshot_patch\ndata: %s\n\n", patch)
+				}
+			} else if bytes.Equal(raw, previous) || (patchUpdates && previous == nil && r.URL.Query().Get("since") == fmt.Sprintf("%x", sha256.Sum256(raw))) {
 				_, err = io.WriteString(writer, ": heartbeat\n\n")
 			} else if patchUpdates && previous != nil {
 				patch, patchErr := snapshotPatch(previous, raw)

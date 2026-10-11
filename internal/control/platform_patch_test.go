@@ -8,10 +8,71 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestPlatformLiveSeededFieldsSkipUnchangedProofAfterBootstrapChanges(t *testing.T) {
+	s, server, client, cookie := liveSnapshotFixture(t)
+	witness, _ := json.Marshal(map[string]string{"stdout": strings.Repeat("complete proof remains available\n", 40000)})
+	if err := s.platform.mutate(func() error {
+		s.platform.state.Tasks["proof"] = &PlatformTask{ID: "proof", GoalLoop: &GoalLoop{Reviews: []GoalReview{{Evidence: witness}}}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	response, raw := snapshotRequest(t, client, server, cookie, "identity")
+	fields := response.Header.Get("X-Refbox-Snapshot-Fields")
+	var hashes map[string]string
+	if json.Unmarshal([]byte(fields), &hashes) != nil || len(hashes) != 7 {
+		t.Fatal("complete bootstrap omitted public field fingerprints")
+	}
+	var state map[string]json.RawMessage
+	if json.Unmarshal(raw, &state) != nil {
+		t.Fatal("bootstrap unavailable")
+	}
+	for key, value := range state {
+		if hashes[key] != fmt.Sprintf("%x", sha256.Sum256(value)) {
+			t.Fatal("field fingerprint does not match complete bootstrap bytes")
+		}
+	}
+	if err := s.platform.mutate(func() error {
+		s.platform.state.Workers["worker-a"].Detail = "real change during slow bootstrap"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", server.URL+"/api/platform/events?updates=patch&since="+response.Header.Get("X-Refbox-Snapshot-Hash")+"&fields="+url.QueryEscape(fields), nil)
+	req.AddCookie(cookie)
+	res, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	frame := readLiveSSEFrame(t, bufio.NewReader(res.Body))
+	if !strings.HasPrefix(frame, "event: snapshot_patch\ndata: ") || len(frame) > 4000 {
+		t.Fatal("slow bootstrap change retransmitted the unchanged complete proof")
+	}
+	var patch map[string]json.RawMessage
+	if json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(frame, "event: snapshot_patch\ndata: "))), &patch) != nil || len(patch) != 1 || patch["workers"] == nil {
+		t.Fatal("bootstrap change did not isolate the changed field")
+	}
+	for key, value := range patch {
+		state[key] = value
+	}
+	full, _ := s.platformSnapshotJSON()
+	var expected map[string]json.RawMessage
+	_ = json.Unmarshal(full, &expected)
+	got, _ := json.Marshal(state)
+	want, _ := json.Marshal(expected)
+	if !bytes.Equal(got, want) {
+		t.Fatal("seeded bootstrap lost the complete proof or current state")
+	}
+}
 
 func TestPlatformLivePatchesPreserveCompleteProofAndResynchronize(t *testing.T) {
 	s, server, client, cookie := liveSnapshotFixture(t)

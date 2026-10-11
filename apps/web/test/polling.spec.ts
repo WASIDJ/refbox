@@ -297,7 +297,9 @@ test("closing slow evidence aborts its read and logout releases pending snapshot
   const server = await slowServer();
   try {
     const dialog = await openCompleteEvidence(page, server.url);
-    await page.clock.runFor(16_000);
+    // Allow the initial stream handshake grace, then enter the actual fallback
+    // interval with both complete HTTP bodies still held by the server.
+    await page.clock.runFor(31_000);
     await expect.poll(() => server.pending.view.size).toBeGreaterThan(0);
     await expect.poll(() => server.pending.snapshot.size).toBeGreaterThan(0);
     await expect.poll(() => server.pending.events.size).toBe(1);

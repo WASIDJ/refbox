@@ -208,6 +208,7 @@ export default function App() {
   const readsStopped = useRef(false);
   const streamConnected = useRef(false);
   const snapshotHash = useRef("");
+  const snapshotFields = useRef("");
   const [newTask, setNewTask] = useState({
     title: "",
     goal: "",
@@ -239,14 +240,17 @@ export default function App() {
     const promise = (async () => {
       try {
         let hash = "";
+        let fields = "";
         const data = await api<Snapshot>("/platform/snapshot", undefined, {
           signal: controller.signal,
           onResponse: (response) => {
             hash = response.headers.get("X-Refbox-Snapshot-Hash") ?? "";
+            fields = response.headers.get("X-Refbox-Snapshot-Fields") ?? "";
           },
         });
         if (!controller.signal.aborted) {
           snapshotHash.current = hash;
+          snapshotFields.current = fields;
           setSnapshot(data);
           setLoaded(true);
         }
@@ -270,6 +274,7 @@ export default function App() {
     modelsRequest.current = null;
     streamConnected.current = false;
     snapshotHash.current = "";
+    snapshotFields.current = "";
   }
   useEffect(() => {
     const expired = () => {
@@ -287,6 +292,7 @@ export default function App() {
   useEffect(() => {
     if (!authenticated) return;
     let active = true;
+    let streamStartedAt = 0;
     readsStopped.current = false;
     const modelsController = new AbortController();
     modelsRequest.current = modelsController;
@@ -300,8 +306,9 @@ export default function App() {
     function startStream() {
       if (!active || readsStopped.current) return;
       const hash = snapshotHash.current;
+      streamStartedAt = Date.now();
       const stream = new EventSource(
-        `/api/platform/events?updates=patch&since=${encodeURIComponent(hash)}`,
+        `/api/platform/events?updates=patch&since=${encodeURIComponent(hash)}&fields=${encodeURIComponent(snapshotFields.current)}`,
       );
       streamRef.current = stream;
       stream.onopen = () => {
@@ -341,7 +348,7 @@ export default function App() {
         }
       });
     const timer = setInterval(() => {
-      if (!streamConnected.current)
+      if (!streamConnected.current && Date.now() - streamStartedAt >= 15000)
         void refresh().catch(() => {
           if (active) setConnected(false);
         });
